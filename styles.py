@@ -78,7 +78,18 @@ APP_STYLESHEET = """
         background: #F9FAFB; border: 1px solid #E5E8EB; border-radius: 12px;
         color: #8B95A1; padding: 14px;
     }
-    QLabel#infoLabel { color: #4E5968; font-size: 12px; line-height: 1.45; }
+    QPlainTextEdit#infoLabel {
+        color: #4E5968; font-size: 12px; line-height: 1.45;
+        background: transparent; border: 0; padding: 0;
+    }
+    QPlainTextEdit#infoLabel QScrollBar:vertical {
+        width: 8px; background: transparent; margin: 1px 0;
+    }
+    QPlainTextEdit#infoLabel QScrollBar::handle:vertical {
+        background: #D1D6DB; border-radius: 4px; min-height: 20px;
+    }
+    QPlainTextEdit#infoLabel QScrollBar::add-line:vertical,
+    QPlainTextEdit#infoLabel QScrollBar::sub-line:vertical { height: 0; }
     QFrame#statusCard {
         background: #F7FAFF; border: 1px solid #D8E9FF; border-radius: 14px;
     }
@@ -97,6 +108,16 @@ APP_STYLESHEET = """
         background: #F9FAFB; border: 1px solid #E5E8EB; border-radius: 10px;
     }
     QScrollArea#imageModalScroll > QWidget > QWidget { background: #F9FAFB; }
+    QScrollArea#analysisScroll { background: transparent; border: 0; }
+    QScrollArea#analysisScroll > QWidget > QWidget { background: transparent; }
+    QScrollArea#analysisScroll QScrollBar:vertical {
+        width: 8px; background: transparent; margin: 8px 0;
+    }
+    QScrollArea#analysisScroll QScrollBar::handle:vertical {
+        background: #D1D6DB; border-radius: 4px; min-height: 24px;
+    }
+    QScrollArea#analysisScroll QScrollBar::add-line:vertical,
+    QScrollArea#analysisScroll QScrollBar::sub-line:vertical { height: 0; }
     QPushButton#zoomButton, QPushButton#zoomResetButton {
         background: #F2F4F6; border: 0; border-radius: 8px; color: #4E5968;
         font-size: 13px; font-weight: 700; min-height: 28px; min-width: 30px; padding: 0 8px;

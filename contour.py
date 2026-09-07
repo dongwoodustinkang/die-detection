@@ -1,9 +1,20 @@
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
 from PIL import Image
+
+from ball import (
+    create_ball_square_crop_preview,
+    draw_ball_squares,
+    get_bottom_contour_x_range,
+    get_bottom_contour_y_by_x,
+    find_downward_contour_white_points,
+    get_bottommost_point_count,
+    get_bottommost_points_by_thirds,
+    select_detected_bottommost_points,
+)
 
 # 검출할 컨투어의 최소/최대 크기
 MIN_CONTOUR_AREA = 3500
@@ -89,6 +100,17 @@ class DetectionResult:
     source_visualization: Optional[np.ndarray] = None
     density_log_lines: List[str] = field(default_factory=list)
     center_split_x: Optional[int] = None
+    a_ball_white_points: List[Tuple[int, int]] = field(default_factory=list)
+    a_ball_bottommost_y: Optional[int] = None
+    a_ball_bottommost_count: int = 0
+    a_ball_bottommost_points_by_third: List[Optional[Tuple[int, int]]] = field(
+        default_factory=list
+    )
+    selected_ball_bottommost_points: List[Tuple[int, int]] = field(
+        default_factory=list
+    )
+    ball_square_crop_preview: Optional[np.ndarray] = None
+    ball_square_surface_bottom_y_by_x: Dict[int, int] = field(default_factory=dict)
 
 
 def to_grayscale(image):
@@ -1763,6 +1785,33 @@ def create_detection_visualization(image_path, show_side_cutting=True):
         draw_side_cutting_boundary(result_image, top_cut_boundary)
         draw_side_cutting_boundary(result_image, bottom_cut_boundary)
 
+    # 컨투어의 하면 기준선 전체에서 아래(y+)로 내려가며 최초로 값 255(흰색)이
+    # 되는 지점을 찾는다. B 페이지는 컨투어 검출에만 사용하고 A에만 표시한다.
+    a_ball_white_points = find_downward_contour_white_points(
+        image_a, result.contours
+    )
+    result.a_ball_white_points = a_ball_white_points
+    result.a_ball_bottommost_y, result.a_ball_bottommost_count = (
+        get_bottommost_point_count(a_ball_white_points)
+    )
+    bottom_contour_x_range = get_bottom_contour_x_range(
+        gray.shape, result.contours
+    )
+    result.a_ball_bottommost_points_by_third = get_bottommost_points_by_thirds(
+        a_ball_white_points, bottom_contour_x_range
+    )
+    result.selected_ball_bottommost_points = select_detected_bottommost_points(
+        result.a_ball_bottommost_points_by_third
+    )
+    result.ball_square_surface_bottom_y_by_x = get_bottom_contour_y_by_x(
+        gray.shape, result.contours
+    )
+    result.ball_square_crop_preview = create_ball_square_crop_preview(
+        image_a,
+        result.selected_ball_bottommost_points,
+        result.ball_square_surface_bottom_y_by_x,
+    )
+
     # A 페이지 상단의 양 끝에서 중앙으로 스캔한 색 변화점을 회색 점으로 표시한다.
     pillar_reference_points = find_top_pillar_reference_points(image_a)
     pillar_outer_reference_points = get_pillar_outer_reference_points(
@@ -1795,6 +1844,11 @@ def create_detection_visualization(image_path, show_side_cutting=True):
         pillar_reference_points,
         pillar_downward_points,
         pillar_downward_bright_points,
+    )
+    source_visualization = draw_ball_squares(
+        source_visualization,
+        result.selected_ball_bottommost_points,
+        result.ball_square_surface_bottom_y_by_x,
     )
     source_preview_image = to_bgr(image_a)
     result.source_visualization = source_visualization

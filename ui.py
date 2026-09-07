@@ -15,6 +15,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -34,8 +35,8 @@ from styles import APP_STYLESHEET
 IMAGE_EXTS = {".tif", ".tiff"}
 DEFAULT_DIR = "dataset/"
 PREVIEW_SCALE = 0.8
-DEV_IMAGE_DIR = Path("/Users/dongwookang/diehand_cv/dataset/side/total")
-# DEV_IMAGE_DIR = Path("/Users/dongwookang/diehand")
+# DEV_IMAGE_DIR = Path("/Users/dongwookang/diehand_cv/dataset/side/total")
+DEV_IMAGE_DIR = Path("/Users/dongwookang/diehand")
 CAPTURE_ROOT = Path(__file__).resolve().parent / "captures"
 
 class ClickableImageLabel(QLabel):
@@ -390,11 +391,11 @@ class MainWindow(QMainWindow):
 
         self.image_paths = []
         self.current_index = -1
-        self.max_ball_count = 3
         self.original_pixmap = QPixmap() # 원본 이미지
         self.result_pixmap = QPixmap() # B 페이지 이미지
         self.analysis_preview_pixmap = QPixmap()
         self.source_preview_pixmap = QPixmap()
+        self.ball_crop_preview_pixmap = QPixmap()
         self.current_histogram_side = "top"
         self.current_histogram_region = "all"
         self.histogram_image_width = 0
@@ -529,11 +530,15 @@ class MainWindow(QMainWindow):
         info_layout.setSpacing(6)
         info_title = QLabel("프로그램 로그")
         info_title.setObjectName("cardTitle")
-        self.info_label = QLabel("이미지를 불러오면 상세 정보가 표시됩니다.")
+        self.info_label = QPlainTextEdit("이미지를 불러오면 상세 정보가 표시됩니다.")
         self.info_label.setObjectName("infoLabel")
-        self.info_label.setTextFormat(Qt.PlainText)
-        self.info_label.setWordWrap(True)
-        self.info_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.info_label.setReadOnly(True)
+        # 로그는 마우스로만 스크롤한다. 화살표 키는 메인 창의 이미지 이동에 쓴다.
+        self.info_label.setFocusPolicy(Qt.NoFocus)
+        self.info_label.setLineWrapMode(QPlainTextEdit.NoWrap)
+        self.info_label.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.info_label.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.info_label.setFixedHeight(self.info_label.fontMetrics().lineSpacing() * 4 + 8)
         info_layout.addWidget(info_title)
         info_layout.addWidget(self.info_label)
         return info_card
@@ -541,7 +546,18 @@ class MainWindow(QMainWindow):
     def _create_analysis_card(self):
         card = QFrame()
         card.setObjectName("analysisCard")
-        layout = QVBoxLayout(card)
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(0, 0, 0, 0)
+        analysis_scroll = QScrollArea()
+        analysis_scroll.setObjectName("analysisScroll")
+        analysis_scroll.setWidgetResizable(True)
+        # 컨투어 영역은 마우스로만 스크롤한다. 화살표 키는 이미지 이동에 사용한다.
+        analysis_scroll.setFocusPolicy(Qt.NoFocus)
+        analysis_scroll.viewport().setFocusPolicy(Qt.NoFocus)
+        analysis_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        analysis_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        content = QWidget()
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(16, 14, 16, 16)
         layout.setSpacing(10)
 
@@ -559,6 +575,11 @@ class MainWindow(QMainWindow):
             layout,
             "최상단/빈도 기준(Gray) 크롭",
             "같은 회색 기준선을 적용한 A/B 페이지 크롭 결과를 비교합니다.",
+        )
+        self.ball_crop_preview_label = self._create_preview_section(
+            layout,
+            "탐지 볼 정사각형 내부 크롭",
+            "조건을 만족하는 볼이 탐지되면 정사각형 내부가 표시됩니다.",
         )
         histogram_header = QHBoxLayout()
         histogram_header.setContentsMargins(0, 0, 0, 0)
@@ -632,6 +653,13 @@ class MainWindow(QMainWindow):
                 self.source_preview_pixmap, "최상단/빈도 기준(Gray) A/B 크롭 비교"
             )
         )
+        self.ball_crop_preview_label.clicked.connect(
+            lambda: self._show_image_modal(
+                self.ball_crop_preview_pixmap, "탐지 볼 정사각형 내부 크롭"
+            )
+        )
+        analysis_scroll.setWidget(content)
+        card_layout.addWidget(analysis_scroll)
         return card
 
     def _create_control_sidebar(self):
@@ -649,7 +677,6 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(self._create_readonly_setting(
             "탐지 유형", "측면 컨투어"
         ))
-        controls_layout.addWidget(self._create_ball_count_control())
         controls_layout.addWidget(self._create_side_cutting_toggle())
         controls_layout.addWidget(self._create_divider())
         controls_layout.addStretch(1)
@@ -704,45 +731,6 @@ class MainWindow(QMainWindow):
         layout.addStretch()
         layout.addWidget(value)
         return setting_row
-
-    def _create_ball_count_control(self):
-        """볼 탐지 로직에서 사용할 최대 탐지 개수 선택기를 만든다."""
-        setting_row = QFrame()
-        setting_row.setObjectName("settingRow")
-        layout = QHBoxLayout(setting_row)
-        layout.setContentsMargins(10, 8, 8, 8)
-        layout.setSpacing(8)
-
-        label = QLabel("최대 볼 탐지 개수")
-        label.setObjectName("controlLabel")
-        segment = QFrame()
-        segment.setObjectName("ballCountSegment")
-        segment_layout = QHBoxLayout(segment)
-        segment_layout.setContentsMargins(2, 2, 2, 2)
-        segment_layout.setSpacing(1)
-
-        self.max_ball_count_group = QButtonGroup(self)
-        self.max_ball_count_group.setExclusive(True)
-        self.max_ball_count_buttons = {}
-        for count in (2, 3):
-            button = QPushButton(str(count))
-            button.setObjectName("ballCountSegmentButton")
-            button.setCheckable(True)
-            self.max_ball_count_group.addButton(button, count)
-            self.max_ball_count_buttons[count] = button
-            segment_layout.addWidget(button)
-        self.max_ball_count_buttons[self.max_ball_count].setChecked(True)
-        self.max_ball_count_group.buttonClicked[int].connect(
-            self._on_max_ball_count_changed
-        )
-
-        layout.addWidget(label)
-        layout.addStretch()
-        layout.addWidget(segment)
-        return setting_row
-
-    def _on_max_ball_count_changed(self, count):
-        self.max_ball_count = count
 
     def _create_side_cutting_toggle(self):
         """A 페이지의 측면 커팅 표시를 켜고 끄는 스위치를 만든다."""
@@ -923,7 +911,8 @@ class MainWindow(QMainWindow):
         started_at = perf_counter()
         try:
             result_image, result = create_detection_visualization(
-                path, show_side_cutting=self.side_cutting_enabled
+                path,
+                show_side_cutting=self.side_cutting_enabled,
             )
         except ValueError as error:
             self._clear_result("검출에 실패했습니다.")
@@ -938,6 +927,7 @@ class MainWindow(QMainWindow):
         self._show_result_image(result_image)
         self._show_analysis_preview(result.analysis_preview)
         self._show_source_preview(result.source_preview)
+        self._show_ball_crop_preview(result.ball_square_crop_preview)
         self._update_info_label(path, result, elapsed_seconds, images_per_second)
         self._show_top_contour_histogram(result.measurements)
 
@@ -976,6 +966,22 @@ class MainWindow(QMainWindow):
         self._set_scaled_pixmap(
             self.source_preview_label,
             self.source_preview_pixmap,
+            preview_scale=PREVIEW_SCALE,
+        )
+
+    def _show_ball_crop_preview(self, bgr_image):
+        if bgr_image is None or bgr_image.size == 0:
+            self.ball_crop_preview_pixmap = QPixmap()
+            self.ball_crop_preview_label.setPixmap(QPixmap())
+            self.ball_crop_preview_label.setText(
+                "조건을 만족하는 볼이 탐지되지 않았습니다."
+            )
+            return
+
+        self.ball_crop_preview_pixmap = self._pixmap_from_image(bgr_image)
+        self._set_scaled_pixmap(
+            self.ball_crop_preview_label,
+            self.ball_crop_preview_pixmap,
             preview_scale=PREVIEW_SCALE,
         )
 
@@ -1043,7 +1049,7 @@ class MainWindow(QMainWindow):
             coordinate_range,
             self.current_histogram_side,
         )
-        self.info_label.setText(
+        self.info_label.setPlainText(
             "\n".join(self.program_log_lines + self.top_contour_histogram.log_lines)
         )
         self.histogram_title.setText(f"{title} · {region_name}")
@@ -1120,6 +1126,11 @@ class MainWindow(QMainWindow):
         self.source_preview_label.setText(
             "같은 회색 기준선을 적용한 A/B 페이지 크롭 결과를 비교합니다."
         )
+        self.ball_crop_preview_pixmap = QPixmap()
+        self.ball_crop_preview_label.setPixmap(QPixmap())
+        self.ball_crop_preview_label.setText(
+            "조건을 만족하는 볼이 탐지되면 정사각형 내부가 표시됩니다."
+        )
         self.top_contour_histogram.set_coordinates(())
         self.histogram_image_width = 0
         self.histogram_center_split_x = 0
@@ -1145,11 +1156,26 @@ class MainWindow(QMainWindow):
                 for measurement in result.measurements
             )
             lines.append(f"3. 4면 첫 접점 개수 : {point_count}개")
+            if result.a_ball_bottommost_y is None:
+                lines.append("4. A 페이지 하면 검출점 최하단 : 없음")
+            else:
+                lines.append(
+                    "4. A 페이지 하면 검출점 최하단 "
+                    f"y={result.a_ball_bottommost_y} : "
+                    f"{result.a_ball_bottommost_count}개"
+                )
+            for section_index, point in enumerate(
+                result.a_ball_bottommost_points_by_third, start=1
+            ):
+                point_text = "없음" if point is None else f"({point[0]}, {point[1]})"
+                lines.append(
+                    f"5-{section_index}. 하면 {section_index}등분 최하단 좌표 : {point_text}"
+                )
             for index, measurement in enumerate(result.measurements, start=1):
                 lines.extend(self._first_contact_log_lines(measurement, index))
             lines.extend(result.density_log_lines)
         self.program_log_lines = lines
-        self.info_label.setText("\n".join(self.program_log_lines))
+        self.info_label.setPlainText("\n".join(self.program_log_lines))
 
         if elapsed_seconds is not None and images_per_second is not None:
             self.header_metadata_label.setText(
@@ -1206,6 +1232,12 @@ class MainWindow(QMainWindow):
             self._set_scaled_pixmap(
                 self.source_preview_label,
                 self.source_preview_pixmap,
+                preview_scale=PREVIEW_SCALE,
+            )
+        if not self.ball_crop_preview_pixmap.isNull():
+            self._set_scaled_pixmap(
+                self.ball_crop_preview_label,
+                self.ball_crop_preview_pixmap,
                 preview_scale=PREVIEW_SCALE,
             )
     def showEvent(self, event):

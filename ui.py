@@ -1,25 +1,29 @@
 """Defect Detector의 macOS 스타일 화면과 사용자 상호작용을 정의한다."""
+import csv
 from datetime import datetime
 from pathlib import Path
 from time import perf_counter
 
 import numpy as np
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import QPoint, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PyQt5.QtWidgets import (
     QButtonGroup,
     QDialog,
     QFileDialog,
     QFrame,
+    QGraphicsDropShadowEffect,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
-    QStyle,
+    QToolButton,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -28,6 +32,8 @@ from contour import (
     MAX_COUNT_RATIO,
     create_detection_visualization,
     get_primary_contact_reference_point,
+    load_ab_tiff_pages,
+    to_bgr,
 )
 from styles import APP_STYLESHEET
 
@@ -38,11 +44,24 @@ PREVIEW_SCALE = 0.8
 # DEV_IMAGE_DIR = Path("/Users/dongwookang/diehand_cv/dataset/side/total")
 DEV_IMAGE_DIR = Path("/Users/dongwookang/diehand")
 CAPTURE_ROOT = Path(__file__).resolve().parent / "captures"
+NOTES_CSV_PATH = Path(__file__).resolve().parent / "notes.csv"
+NOTE_CSV_FIELDS = ("path", "filename", "note", "created_at", "modified_at")
+
+ALGORITHM_OPTIONS = {
+    "side": {"label": "Side", "show_side_cutting": True},
+    "bottom": {"label": "Bottom", "show_side_cutting": True},
+    "top": {"label": "Top", "show_side_cutting": True},
+}
 
 class ClickableImageLabel(QLabel):
     """클릭 이벤트를 전달하는 이미지 라벨."""
 
     clicked = pyqtSignal()
+    hovered = pyqtSignal(QPoint)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setMouseTracking(True)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -50,6 +69,14 @@ class ClickableImageLabel(QLabel):
             event.accept()
             return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        self.hovered.emit(event.pos())
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        QToolTip.hideText()
+        super().leaveEvent(event)
 
 
 class TopContourHistogram(QWidget):
@@ -171,7 +198,7 @@ class TopContourHistogram(QWidget):
         rect = self.rect().adjusted(12, 10, -12, -10)
 
         if not self.coordinates:
-            painter.setPen(QColor("#8B95A1"))
+            painter.setPen(QColor("#8E8E93"))
             painter.drawText(rect, Qt.AlignCenter, "상면 컨투어 접점 좌표가 없습니다.")
             return
 
@@ -201,7 +228,7 @@ class TopContourHistogram(QWidget):
             return
 
         total_coordinate_count = len(self.coordinates)
-        painter.setPen(QPen(QColor("#DDE3EA"), 1))
+        painter.setPen(QPen(QColor("#D1D1D6"), 1))
         painter.drawLine(left, bottom, right, bottom)
         painter.drawLine(left, top, left, bottom)
 
@@ -233,9 +260,9 @@ class TopContourHistogram(QWidget):
             bar_left = left + index * bin_width + 1
             bar_width = max(1, bin_width - 2)
             bar_color = (
-                QColor("#F04452") if count == maximum_count
-                else QColor("#FF9200") if index in merge_bar_indexes
-                else QColor("#3182F6")
+                QColor("#FF453A") if count == maximum_count
+                else QColor("#FF9F0A") if index in merge_bar_indexes
+                else QColor("#0A84FF")
             )
             painter.fillRect(
                 int(round(bar_left)),
@@ -245,7 +272,7 @@ class TopContourHistogram(QWidget):
                 bar_color,
             )
 
-        painter.setPen(QColor("#6B7684"))
+        painter.setPen(QColor("#6E6E73"))
         painter.drawText(
             0, top - 1, left - 5, 16,
             Qt.AlignRight | Qt.AlignVCenter, str(total_coordinate_count),
@@ -267,11 +294,12 @@ class TopContourHistogram(QWidget):
 class ImageModal(QDialog):
     """이미지를 중앙에서 크게 확인하고 다시 클릭해 닫는 모달."""
 
-    def __init__(self, parent):
+    def __init__(self, parent, show_pixel_tooltip=True):
         super().__init__(parent)
         self._pixmap = QPixmap()
         self.setObjectName("imageModal")
         self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
         self.setModal(True)
 
         layout = QVBoxLayout(self)
@@ -316,6 +344,12 @@ class ImageModal(QDialog):
         self.hint_label.setObjectName("imageModalHint")
         self.hint_label.setAlignment(Qt.AlignCenter)
         self.image_label.clicked.connect(self.accept)
+        if show_pixel_tooltip:
+            self.image_label.hovered.connect(
+                lambda position: MainWindow._show_pixel_tooltip(
+                    self.image_label, self._pixmap, position
+                )
+            )
         self.zoom_out_button.clicked.connect(lambda: self._change_zoom(1 / 1.25))
         self.zoom_reset_button.clicked.connect(self._reset_zoom)
         self.zoom_in_button.clicked.connect(lambda: self._change_zoom(1.25))
@@ -380,6 +414,178 @@ class ImageModal(QDialog):
         self._refresh_pixmap()
 
 
+class InspectionInfoModal(QDialog):
+    """검사 로그를 필요할 때만 확인하는 정보 모달."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setObjectName("inspectionInfoModal")
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setModal(True)
+
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(18, 18, 18, 18)
+        card = QFrame()
+        card.setObjectName("inspectionInfoModalCard")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(20, 18, 20, 20)
+        card_layout.setSpacing(12)
+
+        header = QHBoxLayout()
+        title = QLabel("검사 상세 정보")
+        title.setObjectName("imageModalTitle")
+        close_button = QPushButton("×")
+        close_button.setObjectName("modalCloseButton")
+        close_button.setToolTip("닫기")
+        close_button.clicked.connect(self.accept)
+        header.addWidget(title)
+        header.addStretch()
+        header.addWidget(close_button)
+
+        self.info_text = QPlainTextEdit()
+        self.info_text.setObjectName("inspectionInfoText")
+        self.info_text.setReadOnly(True)
+        self.info_text.setFocusPolicy(Qt.NoFocus)
+        self.info_text.setLineWrapMode(QPlainTextEdit.NoWrap)
+        card_layout.addLayout(header)
+        card_layout.addWidget(self.info_text, stretch=1)
+        outer_layout.addWidget(card, stretch=1)
+
+    def show_text(self, text):
+        parent_size = self.parentWidget().size()
+        self.resize(
+            max(440, min(round(parent_size.width() * 0.42), 720)),
+            max(360, min(round(parent_size.height() * 0.66), 760)),
+        )
+        parent_center = self.parentWidget().mapToGlobal(
+            self.parentWidget().rect().center()
+        )
+        self.move(parent_center - self.rect().center())
+        self.info_text.setPlainText(text)
+        self.exec_()
+
+
+class NoteModal(QDialog):
+    """현재 검사 이미지에 대한 간단한 메모를 CSV로 남기는 모달."""
+
+    def __init__(self, parent, source_path):
+        super().__init__(parent)
+        self.source_path = source_path
+        self.path_text = str(source_path.parent)
+        self.filename = source_path.name
+        self.existing_note = self._find_existing_note()
+        self.setObjectName("noteModal")
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setModal(True)
+
+        outer_layout = QVBoxLayout(self)
+        outer_layout.setContentsMargins(18, 18, 18, 18)
+        card = QFrame()
+        card.setObjectName("noteModalCard")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(20, 18, 20, 20)
+        card_layout.setSpacing(12)
+
+        header = QHBoxLayout()
+        title = QLabel("메모 수정" if self.existing_note else "메모 추가")
+        title.setObjectName("imageModalTitle")
+        close_button = QPushButton("×")
+        close_button.setObjectName("modalCloseButton")
+        close_button.setToolTip("닫기")
+        close_button.clicked.connect(self.reject)
+        header.addWidget(title)
+        header.addStretch()
+        header.addWidget(close_button)
+
+        file_label = QLabel(f"{self.path_text}  /  {self.filename}")
+        file_label.setObjectName("noteFileLabel")
+        self.note_input = QPlainTextEdit()
+        self.note_input.setObjectName("noteInput")
+        self.note_input.setPlaceholderText("이 이미지에 대한 메모를 입력하세요.")
+        self.note_input.setTabChangesFocus(True)
+        if self.existing_note:
+            self.note_input.setPlainText(self.existing_note["note"])
+        save_button = QPushButton("메모 저장")
+        save_button.setObjectName("noteSaveButton")
+        save_button.clicked.connect(self._save_note)
+
+        card_layout.addLayout(header)
+        card_layout.addWidget(file_label)
+        card_layout.addWidget(self.note_input, stretch=1)
+        card_layout.addWidget(save_button)
+        outer_layout.addWidget(card, stretch=1)
+
+    def show_modal(self):
+        parent_size = self.parentWidget().size()
+        self.resize(
+            max(420, min(round(parent_size.width() * 0.36), 620)),
+            max(300, min(round(parent_size.height() * 0.46), 480)),
+        )
+        parent_center = self.parentWidget().mapToGlobal(
+            self.parentWidget().rect().center()
+        )
+        self.move(parent_center - self.rect().center())
+        self.note_input.setFocus()
+        self.exec_()
+
+    def _find_existing_note(self):
+        for row in reversed(self._read_notes()):
+            if (
+                row.get("filename") == self.filename
+                and row.get("path") in {self.path_text, ""}
+            ):
+                return row
+        return None
+
+    @staticmethod
+    def _read_notes():
+        if not NOTES_CSV_PATH.exists() or NOTES_CSV_PATH.stat().st_size == 0:
+            return []
+        with NOTES_CSV_PATH.open(newline="", encoding="utf-8-sig") as csv_file:
+            return list(csv.DictReader(csv_file))
+
+    def _save_note(self):
+        note = self.note_input.toPlainText().strip()
+        if not note:
+            QMessageBox.information(self, "메모 저장", "메모 내용을 입력하세요.")
+            return
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        rows = self._read_notes()
+        created_at = timestamp
+        if self.existing_note:
+            created_at = self.existing_note.get("created_at") or timestamp
+        note_record = {
+            "path": self.path_text,
+            "filename": self.filename,
+            "note": note,
+            "created_at": created_at,
+            "modified_at": timestamp,
+        }
+        matching_index = next(
+            (
+                index
+                for index, row in enumerate(rows)
+                if row.get("filename") == self.filename
+                and row.get("path") in {self.path_text, ""}
+            ),
+            None,
+        )
+        if matching_index is None:
+            rows.append(note_record)
+        else:
+            rows[matching_index] = note_record
+
+        with NOTES_CSV_PATH.open("w", newline="", encoding="utf-8-sig") as csv_file:
+            writer = csv.DictWriter(csv_file, fieldnames=NOTE_CSV_FIELDS)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({field: row.get(field, "") for field in NOTE_CSV_FIELDS})
+        self.accept()
+
+
 class MainWindow(QMainWindow):
     """A/B TIFF의 B 페이지 컨투어를 확인하는 메인 창."""
 
@@ -393,6 +599,11 @@ class MainWindow(QMainWindow):
         self.current_index = -1
         self.original_pixmap = QPixmap() # 원본 이미지
         self.result_pixmap = QPixmap() # B 페이지 이미지
+        self.raw_original_pixmap = QPixmap()
+        self.raw_result_pixmap = QPixmap()
+        self.annotated_original_pixmap = QPixmap()
+        self.annotated_result_pixmap = QPixmap()
+        self.show_analysis_overlay = True
         self.analysis_preview_pixmap = QPixmap()
         self.source_preview_pixmap = QPixmap()
         self.ball_crop_preview_pixmap = QPixmap()
@@ -402,11 +613,11 @@ class MainWindow(QMainWindow):
         self.histogram_center_split_x = 0
         self.histogram_measurements = []
         self.program_log_lines = []
-        self.side_cutting_enabled = False
+        self.inspection_info_text = "이미지를 불러오면 상세 정보가 표시됩니다."
         self.capture_session_dir = None
-        self.capture_btn = QPushButton()
+        self.active_algorithm = "side"
+        self.capture_btn = QPushButton("📸")
         self.capture_btn.setObjectName("captureIconButton")
-        self.capture_btn.setIcon(self.style().standardIcon(QStyle.SP_DialogSaveButton))
         self.capture_btn.setToolTip("현재 화면 캡처 저장")
         self.capture_btn.clicked.connect(self.on_capture)
         self._build_ui()
@@ -417,90 +628,279 @@ class MainWindow(QMainWindow):
         central = QWidget()
         central.setObjectName("centralWidget")
         self.setCentralWidget(central)
+        self.central_widget = central
         root = QVBoxLayout(central)
         root.setContentsMargins(24, 20, 24, 24)
         root.setSpacing(16)
 
         root.addLayout(self._create_header())
         root.addLayout(self._create_workspace(), stretch=1)
+        self._create_floating_navigation()
         self.prev_btn.setEnabled(False)
+        self.note_btn.setEnabled(False)
         self.next_btn.setEnabled(False)
+        self.detect_btn.setEnabled(False)
+
+    def _position_floating_navigation(self):
+        """Anchor the transient image controls to the lower centre of the workspace."""
+        if not hasattr(self, "floating_navigation"):
+            return
+        navigation = self.floating_navigation
+        navigation.adjustSize()
+        x = max(0, (self.central_widget.width() - navigation.width()) // 2)
+        y = max(0, self.central_widget.height() - navigation.height() - 20)
+        navigation.move(x, y)
+        navigation.raise_()
+
+    def enterEvent(self, event):
+        super().enterEvent(event)
+        if hasattr(self, "floating_navigation"):
+            self._position_floating_navigation()
+            self.floating_navigation.show()
+
+    def leaveEvent(self, event):
+        super().leaveEvent(event)
+        if hasattr(self, "floating_navigation"):
+            self.floating_navigation.hide()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_floating_navigation()
+
+    def _update_algorithm_title(self):
+        label = ALGORITHM_OPTIONS[self.active_algorithm]["label"]
+        self.algorithm_button.setText(f"{label} Detection")
+
+    def _on_algorithm_changed(self, _checked=False):
+        """Switch the processing mode and return to the pre-import state."""
+        action = self.sender()
+        algorithm_key = action.data() if action is not None else None
+        if algorithm_key not in ALGORITHM_OPTIONS or algorithm_key == self.active_algorithm:
+            return
+
+        self.active_algorithm = algorithm_key
+        self._update_algorithm_title()
+        self._reset_for_algorithm_change()
+
+    def _reset_for_algorithm_change(self):
+        """Clear an earlier run so files are never analysed with the wrong mode."""
+        algorithm_label = ALGORITHM_OPTIONS[self.active_algorithm]["label"]
+        self.image_paths = []
+        self.current_index = -1
+        self.original_pixmap = QPixmap()
+        self.result_pixmap = QPixmap()
+        self.raw_original_pixmap = QPixmap()
+        self.raw_result_pixmap = QPixmap()
+        self.annotated_original_pixmap = QPixmap()
+        self.annotated_result_pixmap = QPixmap()
+        self.analysis_preview_pixmap = QPixmap()
+        self.source_preview_pixmap = QPixmap()
+        self.ball_crop_preview_pixmap = QPixmap()
+        self.capture_session_dir = None
+        self.histogram_image_width = 0
+        self.histogram_center_split_x = 0
+        self.histogram_measurements = []
+        self.program_log_lines = []
+
+        self.image_label.setPixmap(QPixmap())
+        self.image_label.setText("A/B TIFF 이미지를 불러오세요.")
+        self.result_label.setPixmap(QPixmap())
+        self.result_label.setText("B 페이지 컨투어 분석 결과가 표시됩니다.")
+        self.analysis_preview_label.setPixmap(QPixmap())
+        self.analysis_preview_label.setText("기둥 기준선을 같은 좌표로 적용한 A/B 페이지 크롭 결과를 비교합니다.")
+        self.analysis_preview_label.timing_label.setText("기둥 기준 + 볼 검출 · — ms")
+        self.source_preview_label.setPixmap(QPixmap())
+        self.source_preview_label.setText("같은 회색 기준선을 적용한 A/B 페이지 크롭 결과를 비교합니다.")
+        self.source_preview_label.timing_label.setText("최상단/빈도 + 볼 검출 · — ms")
+        self.ball_crop_preview_label.setPixmap(QPixmap())
+        self.ball_crop_preview_label.setText("조건을 만족하는 볼이 탐지되면 정사각형 내부가 표시됩니다.")
+        self.top_contour_histogram.set_coordinates(())
+        self.histogram_title.setText("상면 외곽 컨투어 첫 접점 y 좌표 분포 · 전체")
+        self.top_contour_count_label.setText("전체 0개")
+        self.inspection_info_text = "이미지를 불러오면 상세 정보가 표시됩니다."
+        self.file_context_label.setText("Filename · 선택된 TIFF 이미지 없음")
+        self.header_metadata_label.setText(f"{algorithm_label} 알고리즘 · TIFF 이미지를 불러오세요.")
+        self._set_detection_state("idle")
+        self.prev_btn.setEnabled(False)
+        self.note_btn.setEnabled(False)
+        self.next_btn.setEnabled(False)
+        self.index_label.setText("0/00")
+        self.detect_btn.setEnabled(False)
 
     def _create_header(self):
         header = QHBoxLayout()
-        header.setSpacing(12)
+        header.setSpacing(10)
 
         title_group = QVBoxLayout()
         title_group.setSpacing(2)
-        title = QLabel("이상탐지 프로그램")
-        title.setObjectName("windowTitle")
+        self.algorithm_button = QToolButton()
+        self.algorithm_button.setObjectName("algorithmButton")
+        self.algorithm_button.setCursor(Qt.PointingHandCursor)
+        self.algorithm_button.setPopupMode(QToolButton.InstantPopup)
+        algorithm_menu = QMenu(self.algorithm_button)
+        for algorithm_key, option in ALGORITHM_OPTIONS.items():
+            action = algorithm_menu.addAction(f"{option['label']} Detection")
+            action.setData(algorithm_key)
+            action.triggered.connect(self._on_algorithm_changed)
+        self.algorithm_button.setMenu(algorithm_menu)
+        self._update_algorithm_title()
         self.header_metadata_label = QLabel(
-            "파일을 불러오면 처리 정보가 표시됩니다."
+            "측면 커팅이 자동으로 적용됩니다."
         )
         self.header_metadata_label.setObjectName("headerMetadata")
-        title_group.addWidget(title)
+        title_group.addWidget(self.algorithm_button)
         title_group.addWidget(self.header_metadata_label)
         header.addLayout(title_group)
-        header.addStretch()
+        header.addStretch(1)
 
-        self.prev_btn = QPushButton("‹")
-        self.prev_btn.setObjectName("navigationButton")
-        self.prev_btn.setToolTip("이전 이미지 (←)")
-        self.next_btn = QPushButton("›")
-        self.next_btn.setObjectName("navigationButton")
-        self.next_btn.setToolTip("다음 이미지 (→)")
-        self.index_label = QLabel("0 / 0")
-        self.index_label.setObjectName("indexLabel")
-        self.prev_btn.clicked.connect(self.show_prev)
-        self.next_btn.clicked.connect(self.show_next)
-        header.addWidget(self.prev_btn)
-        header.addWidget(self.index_label)
-        header.addWidget(self.next_btn)
-        header.addWidget(self.capture_btn)
+        file_context = QFrame()
+        file_context.setObjectName("fileContext")
+        file_layout = QHBoxLayout(file_context)
+        file_layout.setContentsMargins(12, 7, 12, 7)
+        file_layout.setSpacing(7)
+        file_icon = QLabel("PATH")
+        file_icon.setObjectName("fileContextIcon")
+        self.file_context_label = QLabel("Filename · 선택된 TIFF 이미지 없음")
+        self.file_context_label.setObjectName("fileContextLabel")
+        self.file_context_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        file_layout.addWidget(file_icon)
+        file_layout.addWidget(self.file_context_label, stretch=1)
+        file_context.setMinimumWidth(360)
+        self.import_btn = QPushButton("불러오기")
+        self.import_btn.setObjectName("secondaryButton")
+        self.detect_btn = QPushButton("검출하기")
+        self.detect_btn.setObjectName("primaryButton")
+        self.import_btn.clicked.connect(self.on_import)
+        self.detect_btn.clicked.connect(self.on_detect)
+        action_group = QFrame()
+        action_group.setObjectName("headerActionGroup")
+        action_layout = QHBoxLayout(action_group)
+        action_layout.setContentsMargins(5, 5, 5, 5)
+        action_layout.setSpacing(6)
+        action_layout.addWidget(file_context, stretch=1)
+        action_layout.addWidget(self.import_btn)
+        action_layout.addWidget(self.detect_btn)
+        header.addWidget(action_group)
+
+        self.detection_result_badge = QFrame()
+        self.detection_result_badge.setObjectName("detectionResultBadge")
+        badge_layout = QHBoxLayout(self.detection_result_badge)
+        badge_layout.setContentsMargins(12, 7, 12, 7)
+        self.detection_result_label = QLabel()
+        self.detection_result_label.setObjectName("detectionResultLabel")
+        badge_layout.addWidget(self.detection_result_label)
+        header.addWidget(self.detection_result_badge)
+        self._set_detection_state("idle")
 
         return header
+
+    def _set_detection_state(self, state):
+        state_text = {
+            "idle": "대기",
+            "detected": "검출",
+            "not_detected": "미검출",
+            "error": "오류",
+        }[state]
+        self.detection_result_badge.setProperty("state", state)
+        self.detection_result_label.setText(state_text)
+        self.detection_result_badge.style().unpolish(self.detection_result_badge)
+        self.detection_result_badge.style().polish(self.detection_result_badge)
+
+    def _create_floating_navigation(self):
+        """Keep image navigation close at hand without permanently occupying workspace."""
+        navigation = QFrame(self.central_widget)
+        navigation.setObjectName("floatingNavigation")
+        navigation.setAttribute(Qt.WA_StyledBackground, True)
+        layout = QHBoxLayout(navigation)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        self.prev_btn = QPushButton("‹")
+        self.prev_btn.setObjectName("floatingNavigationButton")
+        self.prev_btn.setToolTip("이전 이미지 (←)")
+        self.note_btn = QPushButton("🗒️")
+        self.note_btn.setObjectName("floatingNavigationButton")
+        self.note_btn.setToolTip("현재 이미지에 메모 추가")
+        self.next_btn = QPushButton("›")
+        self.next_btn.setObjectName("floatingNavigationButton")
+        self.next_btn.setToolTip("다음 이미지 (→)")
+        self.index_label = QLabel("0/00")
+        self.index_label.setObjectName("floatingIndexLabel")
+        self.prev_btn.clicked.connect(self.show_prev)
+        self.note_btn.clicked.connect(self._show_note_modal)
+        self.next_btn.clicked.connect(self.show_next)
+
+        layout.addWidget(self.prev_btn)
+        layout.addWidget(self.note_btn)
+        layout.addWidget(self.index_label)
+        layout.addWidget(self.capture_btn)
+        layout.addWidget(self.next_btn)
+        navigation.adjustSize()
+        navigation.hide()
+        self.floating_navigation = navigation
 
     def _create_workspace(self):
         """원본·분석·설정을 역할에 맞는 세 영역으로 배치한다."""
         workspace = QHBoxLayout()
         workspace.setSpacing(16)
 
-        source_column = QVBoxLayout()
-        source_column.setSpacing(16)
-        source_column.addWidget(self._create_source_card(), stretch=4)
-        source_column.addWidget(self._create_log_card(), stretch=1)
-
-        workspace.addLayout(source_column, stretch=5)
-        workspace.addWidget(self._create_analysis_card(), stretch=3)
-        workspace.addWidget(self._create_control_sidebar(), stretch=2)
+        workspace.addWidget(self._create_source_card(), stretch=6)
+        workspace.addWidget(self._create_analysis_card(), stretch=4)
         return workspace
 
     def _create_source_card(self):
         card = QFrame()
         card.setObjectName("imageCard")
+        self._apply_glass_elevation(card)
         layout = QVBoxLayout(card)
         layout.setContentsMargins(16, 14, 16, 16)
         layout.setSpacing(10)
 
-        title = QLabel("원본 이미지")
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
+        title = QLabel("이미지 비교")
         title.setObjectName("cardTitle")
-        layout.addWidget(title)
+        self.overlay_switch = QPushButton("분석선")
+        self.overlay_switch.setObjectName("imageOverlaySwitch")
+        self.overlay_switch.setCheckable(True)
+        self.overlay_switch.setChecked(True)
+        self.overlay_switch.setToolTip("기준선·컨투어선 표시 전환")
+        self.overlay_switch.toggled.connect(self._on_overlay_toggled)
+        info_button = QPushButton("ℹ")
+        info_button.setObjectName("infoButton")
+        info_button.setToolTip("검사 상세 정보 보기")
+        info_button.clicked.connect(self._show_inspection_info)
+        title_row.addWidget(title)
+        title_row.addWidget(self.overlay_switch)
+        title_row.addWidget(info_button)
+        title_row.addStretch()
+        layout.addLayout(title_row)
         layout.addWidget(self._create_divider())
 
         image_pair = QHBoxLayout()
         image_pair.setSpacing(14)
 
         source_panel, self.image_label = self._create_image_panel(
-            "A 페이지", "A/B TIFF 이미지를 불러오세요."
+            "Image A · 분석 오버레이", "A/B TIFF 이미지를 불러오세요."
         )
         result_panel, self.result_label = self._create_image_panel(
-            "B 페이지 결과", "B 페이지 컨투어 분석 결과가 표시됩니다."
+            "Image B · 검사 오버레이", "B 페이지 컨투어 분석 결과가 표시됩니다."
         )
         self.image_label.clicked.connect(
             lambda: self._show_image_modal(self.original_pixmap, "A 페이지")
         )
         self.result_label.clicked.connect(
             lambda: self._show_image_modal(self.result_pixmap, "B 페이지 결과")
+        )
+        self.image_label.hovered.connect(
+            lambda position: self._show_pixel_tooltip(
+                self.image_label, self.original_pixmap, position
+            )
+        )
+        self.result_label.hovered.connect(
+            lambda position: self._show_pixel_tooltip(
+                self.result_label, self.result_pixmap, position
+            )
         )
         image_pair.addWidget(source_panel, stretch=1)
         image_pair.addWidget(result_panel, stretch=1)
@@ -518,34 +918,14 @@ class MainWindow(QMainWindow):
         layout.addWidget(title)
 
         label = self._create_image_label(empty_text)
+        label.panel_title = title
         layout.addWidget(label, stretch=1)
         return panel, label
-
-    def _create_log_card(self):
-        info_card = QFrame()
-        info_card.setObjectName("logCard")
-        info_card.setMinimumHeight(126)
-        info_layout = QVBoxLayout(info_card)
-        info_layout.setContentsMargins(16, 13, 16, 13)
-        info_layout.setSpacing(6)
-        info_title = QLabel("프로그램 로그")
-        info_title.setObjectName("cardTitle")
-        self.info_label = QPlainTextEdit("이미지를 불러오면 상세 정보가 표시됩니다.")
-        self.info_label.setObjectName("infoLabel")
-        self.info_label.setReadOnly(True)
-        # 로그는 마우스로만 스크롤한다. 화살표 키는 메인 창의 이미지 이동에 쓴다.
-        self.info_label.setFocusPolicy(Qt.NoFocus)
-        self.info_label.setLineWrapMode(QPlainTextEdit.NoWrap)
-        self.info_label.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.info_label.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.info_label.setFixedHeight(self.info_label.fontMetrics().lineSpacing() * 4 + 8)
-        info_layout.addWidget(info_title)
-        info_layout.addWidget(self.info_label)
-        return info_card
 
     def _create_analysis_card(self):
         card = QFrame()
         card.setObjectName("analysisCard")
+        self._apply_glass_elevation(card)
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(0, 0, 0, 0)
         analysis_scroll = QScrollArea()
@@ -561,24 +941,26 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(16, 14, 16, 16)
         layout.setSpacing(10)
 
-        title = QLabel("컨투어 이미지")
+        title = QLabel("상세 컨투어")
         title.setObjectName("cardTitle")
         layout.addWidget(title)
         layout.addWidget(self._create_divider())
 
         self.analysis_preview_label = self._create_preview_section(
             layout,
-            "기둥 기준(Blue) A/B 크롭 비교",
+            "기둥 기준 · A/B 크롭 비교",
             "기둥 기준선을 같은 좌표로 적용한 A/B 페이지 크롭 결과를 비교합니다.",
+            timing_caption="기둥 기준 + 볼 검출",
         )
         self.source_preview_label = self._create_preview_section(
             layout,
-            "최상단/빈도 기준(Gray) 크롭",
+            "최상단/빈도 기준 · 크롭",
             "같은 회색 기준선을 적용한 A/B 페이지 크롭 결과를 비교합니다.",
+            timing_caption="최상단/빈도 + 볼 검출",
         )
         self.ball_crop_preview_label = self._create_preview_section(
             layout,
-            "탐지 볼 정사각형 내부 크롭",
+            "볼 검출 · 상세 크롭",
             "조건을 만족하는 볼이 탐지되면 정사각형 내부가 표시됩니다.",
         )
         histogram_header = QHBoxLayout()
@@ -645,69 +1027,37 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.top_contour_histogram)
         self.analysis_preview_label.clicked.connect(
             lambda: self._show_image_modal(
-                self.analysis_preview_pixmap, "기둥 기준(Blue) A/B 크롭 비교"
+                self.analysis_preview_pixmap,
+                "기둥 기준(Blue) A/B 크롭 비교",
+                show_pixel_tooltip=False,
             )
         )
         self.source_preview_label.clicked.connect(
             lambda: self._show_image_modal(
-                self.source_preview_pixmap, "최상단/빈도 기준(Gray) A/B 크롭 비교"
+                self.source_preview_pixmap,
+                "최상단/빈도 기준(Gray) A/B 크롭 비교",
+                show_pixel_tooltip=False,
             )
         )
         self.ball_crop_preview_label.clicked.connect(
             lambda: self._show_image_modal(
-                self.ball_crop_preview_pixmap, "탐지 볼 정사각형 내부 크롭"
+                self.ball_crop_preview_pixmap,
+                "탐지 볼 정사각형 내부 크롭",
+                show_pixel_tooltip=False,
             )
         )
         analysis_scroll.setWidget(content)
         card_layout.addWidget(analysis_scroll)
         return card
 
-    def _create_control_sidebar(self):
-        controls = QFrame()
-        controls.setObjectName("controlCard")
-        controls.setMinimumWidth(280)
-        controls_layout = QVBoxLayout(controls)
-        controls_layout.setContentsMargins(18, 16, 18, 18)
-        controls_layout.setSpacing(12)
-
-        controls_title = QLabel("탐지 설정")
-        controls_title.setObjectName("cardTitle")
-        controls_layout.addWidget(controls_title)
-        controls_layout.addWidget(self._create_divider())
-        controls_layout.addWidget(self._create_readonly_setting(
-            "탐지 유형", "측면 컨투어"
-        ))
-        controls_layout.addWidget(self._create_side_cutting_toggle())
-        controls_layout.addWidget(self._create_divider())
-        controls_layout.addStretch(1)
-
-        status_box = QFrame()
-        status_box.setObjectName("statusCard")
-        status_layout = QVBoxLayout(status_box)
-        status_layout.setContentsMargins(12, 18, 12, 18)
-        status_layout.setSpacing(7)
-        self.status_label = QLabel("분석 대기")
-        self.status_label.setObjectName("statusValue")
-        self.status_label.setAlignment(Qt.AlignCenter)
-        self.status_detail_label = QLabel("이미지를 불러오세요.")
-        self.status_detail_label.setObjectName("statusDetail")
-        self.status_detail_label.setAlignment(Qt.AlignCenter)
-        self.status_detail_label.setWordWrap(True)
-        status_layout.addWidget(self.status_label)
-        status_layout.addWidget(self.status_detail_label)
-        controls_layout.addWidget(status_box)
-        controls_layout.addStretch(1)
-
-        self.import_btn = QPushButton("불러오기")
-        self.import_btn.setObjectName("secondaryButton")
-        self.detect_btn = QPushButton("검출하기")
-        self.detect_btn.setObjectName("primaryButton")
-        self.import_btn.clicked.connect(self.on_import)
-        self.detect_btn.clicked.connect(self.on_detect)
-        controls_layout.addWidget(self.import_btn)
-        controls_layout.addWidget(self.detect_btn)
-
-        return controls
+    @staticmethod
+    def _apply_glass_elevation(widget, blur_radius=28, y_offset=6):
+        """Give a translucent material card a restrained macOS-style elevation."""
+        shadow = QGraphicsDropShadowEffect(widget)
+        shadow.setBlurRadius(blur_radius)
+        shadow.setOffset(0, y_offset)
+        shadow.setColor(QColor(31, 40, 55, 26))
+        widget.setGraphicsEffect(shadow)
 
     @staticmethod
     def _create_divider():
@@ -717,56 +1067,25 @@ class MainWindow(QMainWindow):
         divider.setFrameShadow(QFrame.Plain)
         return divider
 
-    def _create_readonly_setting(self, label_text, value_text):
-        setting_row = QFrame()
-        setting_row.setObjectName("settingRow")
-        layout = QHBoxLayout(setting_row)
-        layout.setContentsMargins(10, 8, 10, 8)
-        layout.setSpacing(8)
-        label = QLabel(label_text)
-        label.setObjectName("controlLabel")
-        value = QLabel(value_text)
-        value.setObjectName("settingValue")
-        layout.addWidget(label)
-        layout.addStretch()
-        layout.addWidget(value)
-        return setting_row
-
-    def _create_side_cutting_toggle(self):
-        """A 페이지의 측면 커팅 표시를 켜고 끄는 스위치를 만든다."""
-        setting_row = QFrame()
-        setting_row.setObjectName("settingRow")
-        layout = QHBoxLayout(setting_row)
-        layout.setContentsMargins(10, 8, 8, 8)
-        layout.setSpacing(8)
-
-        label = QLabel("측면 커팅")
-        label.setObjectName("controlLabel")
-        self.side_cutting_switch = QPushButton("OFF")
-        self.side_cutting_switch.setObjectName("sideCuttingSwitch")
-        self.side_cutting_switch.setCheckable(True)
-        self.side_cutting_switch.setChecked(False)
-        self.side_cutting_switch.toggled.connect(self._on_side_cutting_toggled)
-
-        layout.addWidget(label)
-        layout.addStretch()
-        layout.addWidget(self.side_cutting_switch)
-        return setting_row
-
-    def _on_side_cutting_toggled(self, enabled):
-        self.side_cutting_enabled = enabled
-        self.side_cutting_switch.setText("ON" if enabled else "OFF")
-        if self.image_paths:
-            self._detect_current_image()
-
-    def _create_preview_section(self, parent_layout, title_text, empty_text):
+    def _create_preview_section(
+        self, parent_layout, title_text, empty_text, timing_caption=None
+    ):
         preview_section = QWidget()
         preview_layout = QVBoxLayout(preview_section)
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.setSpacing(6)
+        title_row = QHBoxLayout()
+        title_row.setContentsMargins(0, 0, 0, 0)
         title = QLabel(title_text)
         title.setObjectName("previewTitle")
-        preview_layout.addWidget(title)
+        title_row.addWidget(title)
+        title_row.addStretch()
+        timing_label = None
+        if timing_caption is not None:
+            timing_label = QLabel(f"{timing_caption} · — ms")
+            timing_label.setObjectName("previewTiming")
+            title_row.addWidget(timing_label)
+        preview_layout.addLayout(title_row)
 
         preview_label = ClickableImageLabel(empty_text)
         preview_label.setObjectName("imagePreview")
@@ -776,6 +1095,8 @@ class MainWindow(QMainWindow):
         # 미리보기 Pixmap의 원본 폭이 카드의 최소 폭으로 전파되지 않게 한다.
         # 따라서 파일마다 미리보기 크기가 달라도 세 컬럼의 폭은 유지된다.
         preview_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
+        preview_label.timing_label = timing_label
+        preview_label.timing_caption = timing_caption
         preview_layout.addWidget(preview_label)
         parent_layout.addWidget(preview_section, stretch=1)
         return preview_label
@@ -790,9 +1111,71 @@ class MainWindow(QMainWindow):
         label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         return label
 
-    def _show_image_modal(self, pixmap, title):
+    def _show_inspection_info(self):
+        InspectionInfoModal(self).show_text(self.inspection_info_text)
+
+    @staticmethod
+    def _show_pixel_tooltip(label, source_pixmap, position):
+        """Convert a cursor position on a fitted preview back to source pixels."""
+        displayed_pixmap = label.pixmap()
+        if source_pixmap.isNull() or displayed_pixmap is None or displayed_pixmap.isNull():
+            QToolTip.hideText()
+            return
+
+        contents = label.contentsRect()
+        image_left = contents.left() + (contents.width() - displayed_pixmap.width()) // 2
+        image_top = contents.top() + (contents.height() - displayed_pixmap.height()) // 2
+        image_rect = displayed_pixmap.rect().translated(image_left, image_top)
+        if not image_rect.contains(position):
+            QToolTip.hideText()
+            return
+
+        source_x = min(
+            source_pixmap.width() - 1,
+            max(0, int((position.x() - image_left) * source_pixmap.width() / displayed_pixmap.width())),
+        )
+        source_y = min(
+            source_pixmap.height() - 1,
+            max(0, int((position.y() - image_top) * source_pixmap.height() / displayed_pixmap.height())),
+        )
+        color = source_pixmap.toImage().pixelColor(source_x, source_y)
+        gray = round(0.299 * color.red() + 0.587 * color.green() + 0.114 * color.blue())
+        QToolTip.showText(
+            label.mapToGlobal(position + QPoint(16, 18)),
+            f"x: {source_x} · y: {source_y} · gray: {gray}",
+            label,
+        )
+
+    def _show_image_modal(self, pixmap, title, show_pixel_tooltip=True):
         if not pixmap.isNull():
-            ImageModal(self).show_pixmap(pixmap, title)
+            ImageModal(self, show_pixel_tooltip).show_pixmap(pixmap, title)
+
+    def _on_overlay_toggled(self, enabled):
+        self.show_analysis_overlay = enabled
+        self.overlay_switch.setText("분석선" if enabled else "원본")
+        display_name = "분석 오버레이" if enabled else "원본"
+        self.image_label.panel_title.setText(f"Image A · {display_name}")
+        self.result_label.panel_title.setText(f"Image B · {display_name}")
+        self._refresh_image_comparison()
+
+    def _refresh_image_comparison(self):
+        """Swap the comparison card between raw TIFF pages and annotated results."""
+        source_pixmap = (
+            self.annotated_original_pixmap
+            if self.show_analysis_overlay
+            else self.raw_original_pixmap
+        )
+        result_pixmap = (
+            self.annotated_result_pixmap
+            if self.show_analysis_overlay
+            else self.raw_result_pixmap
+        )
+        if not source_pixmap.isNull():
+            self.original_pixmap = source_pixmap
+            self._set_scaled_pixmap(self.image_label, source_pixmap)
+        if not result_pixmap.isNull():
+            self.result_pixmap = result_pixmap
+            self._set_scaled_pixmap(self.result_label, result_pixmap)
 
     # ---------------- Capture ----------------
     @staticmethod
@@ -828,9 +1211,18 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "캡처 저장", "화면 캡처를 저장하지 못했습니다.")
             return
 
-        self.status_detail_label.setText(
+        self.header_metadata_label.setText(
             f"캡처 저장 완료: {capture_path.relative_to(CAPTURE_ROOT)}"
         )
+
+    def _show_note_modal(self):
+        if not self.image_paths or self.current_index < 0:
+            return
+        source_path = self.image_paths[self.current_index]
+        modal = NoteModal(self, source_path)
+        modal.show_modal()
+        if modal.result() == QDialog.Accepted:
+            self.header_metadata_label.setText(f"메모 저장 완료: {source_path.name}")
 
     # ---------------- Import ----------------
     def on_import(self):
@@ -876,6 +1268,8 @@ class MainWindow(QMainWindow):
     def _set_image_list(self, paths):
         self.image_paths = paths
         self.current_index = 0
+        self.detect_btn.setEnabled(True)
+        self.note_btn.setEnabled(True)
         self._show_current()
 
     # ---------------- Navigation ----------------
@@ -893,7 +1287,11 @@ class MainWindow(QMainWindow):
         path = self.image_paths[self.current_index]
         self.original_pixmap = QPixmap(str(path))
         self._set_scaled_pixmap(self.image_label, self.original_pixmap)
-        self.index_label.setText(f"{self.current_index + 1} / {len(self.image_paths)}")
+        self.file_context_label.setText(f"{path.parent.name}  /  {path.name}")
+        position = f"{self.current_index + 1} / {len(self.image_paths)}"
+        self.index_label.setText(position.replace(" / ", "/"))
+        self.prev_btn.setToolTip(f"이전 이미지 (←) · {position}")
+        self.next_btn.setToolTip(f"다음 이미지 (→) · {position}")
         self.prev_btn.setEnabled(self.current_index > 0)
         self.next_btn.setEnabled(self.current_index < len(self.image_paths) - 1)
 
@@ -912,7 +1310,7 @@ class MainWindow(QMainWindow):
         try:
             result_image, result = create_detection_visualization(
                 path,
-                show_side_cutting=self.side_cutting_enabled,
+                show_side_cutting=ALGORITHM_OPTIONS[self.active_algorithm]["show_side_cutting"],
             )
         except ValueError as error:
             self._clear_result("검출에 실패했습니다.")
@@ -923,11 +1321,20 @@ class MainWindow(QMainWindow):
         images_per_second = 1 / max(elapsed_seconds, 0.000001)
         self.histogram_image_width = result_image.shape[1]
         self.histogram_center_split_x = result.center_split_x or self.histogram_image_width // 2
-        self._show_original_image(result.source_visualization)
-        self._show_result_image(result_image)
+        image_a, image_b = load_ab_tiff_pages(path)
+        self.raw_original_pixmap = self._pixmap_from_image(to_bgr(image_a))
+        self.raw_result_pixmap = self._pixmap_from_image(to_bgr(image_b))
+        self.annotated_original_pixmap = self._pixmap_from_image(
+            result.source_visualization
+        )
+        self.annotated_result_pixmap = self._pixmap_from_image(result_image)
+        self._refresh_image_comparison()
         self._show_analysis_preview(result.analysis_preview)
         self._show_source_preview(result.source_preview)
         self._show_ball_crop_preview(result.ball_square_crop_preview)
+        self._show_preview_timings(result)
+        is_detected = bool(result.contours and result.selected_ball_bottommost_points)
+        self._set_detection_state("detected" if is_detected else "not_detected")
         self._update_info_label(path, result, elapsed_seconds, images_per_second)
         self._show_top_contour_histogram(result.measurements)
 
@@ -983,6 +1390,14 @@ class MainWindow(QMainWindow):
             self.ball_crop_preview_label,
             self.ball_crop_preview_pixmap,
             preview_scale=PREVIEW_SCALE,
+        )
+
+    def _show_preview_timings(self, result):
+        self.analysis_preview_label.timing_label.setText(
+            f"기둥 기준 + 볼 검출 · {result.pillar_with_ball_ms:.1f} ms"
+        )
+        self.source_preview_label.timing_label.setText(
+            f"최상단/빈도 + 볼 검출 · {result.frequency_with_ball_ms:.1f} ms"
         )
 
     def _on_histogram_side_changed(self, button):
@@ -1049,8 +1464,8 @@ class MainWindow(QMainWindow):
             coordinate_range,
             self.current_histogram_side,
         )
-        self.info_label.setPlainText(
-            "\n".join(self.program_log_lines + self.top_contour_histogram.log_lines)
+        self.inspection_info_text = "\n".join(
+            self.program_log_lines + self.top_contour_histogram.log_lines
         )
         self.histogram_title.setText(f"{title} · {region_name}")
         self.top_contour_count_label.setText(f"{region_name} {len(coordinates):,}개")
@@ -1136,31 +1551,28 @@ class MainWindow(QMainWindow):
         self.histogram_center_split_x = 0
         self.histogram_measurements = []
         self.top_contour_count_label.setText("전체 0개")
-        self.status_label.setText("분석 실패")
-        self.status_label.setStyleSheet("color: #F04452;")
-        self.status_detail_label.setText(message)
+        self.header_metadata_label.setText(f"검사 실패 · {message}")
+        self._set_detection_state("error")
 
     def _update_info_label(
         self, path, result=None, elapsed_seconds=None, images_per_second=None
     ):
+        algorithm_label = ALGORITHM_OPTIONS[self.active_algorithm]["label"]
         lines = [
-            f"1. 이미지 크기  {self.original_pixmap.width()} × {self.original_pixmap.height()} px",
+            f"이미지 크기  {self.original_pixmap.width()} × {self.original_pixmap.height()} px",
         ]
         if result is not None:
-            lines.append(f"2. B 페이지 외곽 컨투어 개수 : {len(result.contours)}개")
-            point_count = sum(
-                len(measurement.top_points)
-                + len(measurement.bottom_points)
-                + len(measurement.left_points)
-                + len(measurement.right_points)
-                for measurement in result.measurements
-            )
-            lines.append(f"3. 4면 첫 접점 개수 : {point_count}개")
+            lines.extend(("", "[표면]"))
+            for index, measurement in enumerate(result.measurements, start=1):
+                lines.extend(self._first_contact_log_lines(measurement, index))
+            lines.extend(result.density_log_lines)
+
+            lines.extend(("", "[볼]"))
             if result.a_ball_bottommost_y is None:
-                lines.append("4. A 페이지 하면 검출점 최하단 : 없음")
+                lines.append("A 페이지 하면 검출점 최하단 : 없음")
             else:
                 lines.append(
-                    "4. A 페이지 하면 검출점 최하단 "
+                    "A 페이지 하면 검출점 최하단 "
                     f"y={result.a_ball_bottommost_y} : "
                     f"{result.a_ball_bottommost_count}개"
                 )
@@ -1169,27 +1581,15 @@ class MainWindow(QMainWindow):
             ):
                 point_text = "없음" if point is None else f"({point[0]}, {point[1]})"
                 lines.append(
-                    f"5-{section_index}. 하면 {section_index}등분 최하단 좌표 : {point_text}"
+                    f"하면 {section_index}등분 최하단 좌표 : {point_text}"
                 )
-            for index, measurement in enumerate(result.measurements, start=1):
-                lines.extend(self._first_contact_log_lines(measurement, index))
-            lines.extend(result.density_log_lines)
         self.program_log_lines = lines
-        self.info_label.setPlainText("\n".join(self.program_log_lines))
+        self.inspection_info_text = "\n".join(self.program_log_lines)
 
         if elapsed_seconds is not None and images_per_second is not None:
             self.header_metadata_label.setText(
-                f"파일 위치  {path.name} · 처리 시간 {elapsed_seconds * 1000:.1f} ms · "
+                f"{algorithm_label} 자동 검사 완료 · {elapsed_seconds * 1000:.1f} ms · "
                 f"{images_per_second:.0f} image/sec"
-            )
-        if result is not None:
-            contour_count = len(result.contours)
-            self.status_label.setText("분석 완료" if contour_count else "컨투어 미검출")
-            self.status_label.setStyleSheet(
-                "color: #3182F6;" if contour_count else "color: #F59F00;"
-            )
-            self.status_detail_label.setText(
-                f"B 페이지 외곽 컨투어 {contour_count}개를 확인했습니다."
             )
 
     @staticmethod

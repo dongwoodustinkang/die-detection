@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Dict, List, Optional, Tuple
 
 import cv2
@@ -111,6 +112,8 @@ class DetectionResult:
     )
     ball_square_crop_preview: Optional[np.ndarray] = None
     ball_square_surface_bottom_y_by_x: Dict[int, int] = field(default_factory=dict)
+    pillar_with_ball_ms: float = 0.0
+    frequency_with_ball_ms: float = 0.0
 
 
 def to_grayscale(image):
@@ -1726,6 +1729,8 @@ def create_detection_visualization(image_path, show_side_cutting=True):
     # 비교용 최상단/빈도(회색) 기준선은 측면 커팅 스위치와 무관하게 계산한다.
     # 스위치는 원본·B 페이지에 실제 컷선을 그릴지 여부만 제어한다.
     image_width = gray.shape[1]
+    frequency_seconds = 0.0
+    frequency_started_at = perf_counter()
     gray_top_cut_boundary = get_concentrated_cut_line(
         result.measurements,
         "top_points",
@@ -1742,6 +1747,7 @@ def create_detection_visualization(image_path, show_side_cutting=True):
             use_maximum=True,
             midpoint_x=center_split_x,
         )
+    frequency_seconds += perf_counter() - frequency_started_at
 
     top_cut_boundary = None
     bottom_cut_boundary = None
@@ -1752,6 +1758,7 @@ def create_detection_visualization(image_path, show_side_cutting=True):
             if log_line:
                 result.density_log_lines.append(log_line)
                 print(log_line)
+        frequency_started_at = perf_counter()
         bottom_cut_boundary = get_concentrated_cut_line(
             result.measurements,
             "bottom_points",
@@ -1772,6 +1779,7 @@ def create_detection_visualization(image_path, show_side_cutting=True):
             log_line = bottom_cut_boundary["density_log_line"]
             result.density_log_lines.append(log_line)
             print(log_line)
+        frequency_seconds += perf_counter() - frequency_started_at
 
     result_image = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR) # 그레이 스케일를 컬로로 변환하여 컨투어 색상이 보이게
     draw_frequency_contact_points(
@@ -1787,6 +1795,7 @@ def create_detection_visualization(image_path, show_side_cutting=True):
 
     # 컨투어의 하면 기준선 전체에서 아래(y+)로 내려가며 최초로 값 255(흰색)이
     # 되는 지점을 찾는다. B 페이지는 컨투어 검출에만 사용하고 A에만 표시한다.
+    ball_started_at = perf_counter()
     a_ball_white_points = find_downward_contour_white_points(
         image_a, result.contours
     )
@@ -1811,8 +1820,11 @@ def create_detection_visualization(image_path, show_side_cutting=True):
         result.selected_ball_bottommost_points,
         result.ball_square_surface_bottom_y_by_x,
     )
+    ball_seconds = perf_counter() - ball_started_at
 
     # A 페이지 상단의 양 끝에서 중앙으로 스캔한 색 변화점을 회색 점으로 표시한다.
+    pillar_seconds = 0.0
+    pillar_started_at = perf_counter()
     pillar_reference_points = find_top_pillar_reference_points(image_a)
     pillar_outer_reference_points = get_pillar_outer_reference_points(
         image_a, pillar_reference_points
@@ -1863,6 +1875,8 @@ def create_detection_visualization(image_path, show_side_cutting=True):
         pillar_contour_contact_points, gray.shape[1]
     )
     existing_top_cut_line = (gray_top_cut_boundary or {}).get("extended_line")
+    pillar_seconds += perf_counter() - pillar_started_at
+    pillar_started_at = perf_counter()
     blue_line_preview = create_polygon_preview(
         source_preview_image,
         result.contours,
@@ -1883,6 +1897,14 @@ def create_detection_visualization(image_path, show_side_cutting=True):
         left_reference_line=blue_left_reference_line,
         right_reference_line=blue_right_reference_line,
     )
+    result.analysis_preview = create_preview_comparison(
+        blue_line_preview,
+        "A Page crop",
+        blue_line_b_preview,
+        "B Page crop",
+    )
+    pillar_seconds += perf_counter() - pillar_started_at
+    frequency_started_at = perf_counter()
     gray_line_preview = create_polygon_preview(
         source_preview_image,
         result.contours,
@@ -1899,16 +1921,13 @@ def create_detection_visualization(image_path, show_side_cutting=True):
         top_cut_line=existing_top_cut_line,
         bottom_cut_line=(bottom_cut_boundary or {}).get("extended_line"),
     )
-    result.analysis_preview = create_preview_comparison(
-        blue_line_preview,
-        "A Page crop",
-        blue_line_b_preview,
-        "B Page crop",
-    )
     result.source_preview = create_preview_comparison(
         gray_line_preview,
         "A Page crop",
         gray_line_b_preview,
         "B Page crop",
     )
+    frequency_seconds += perf_counter() - frequency_started_at
+    result.pillar_with_ball_ms = (pillar_seconds + ball_seconds) * 1000
+    result.frequency_with_ball_ms = (frequency_seconds + ball_seconds) * 1000
     return result_image, result

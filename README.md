@@ -1,37 +1,57 @@
-# Die Surface Contour Inspector
+# Semiconductor Die Surface Inspection System
 
-> An OpenCV-based program designed to swiftly detect defects on the top, bottom, left, and right plates of a die surface.
+[English](README.md) | [한국어](README_KO.md)
+
+> An OpenCV-based program designed to rapidly detect defects on the top, bottom, left, and right surfaces of semiconductor dies.
 
 <img src="assets/thumnail.png" width=1280>
 
-## Current Feature
-#### Side Surface
-1. Processed the side images using brightness binarization and contouring, generating vertical search lines based on the initial contact points from the image edges to the surface.
-     - To prevent errors caused by a slight rotation of the side, the surface was divided into ‭$N$‬ segments to accurately identify the contact points.
-2. For the side balls, the bottom section of the surface contour was divided into three parts to find the furthest point, and the process of fitting a circle centered on that point is currently in progress.
+## Background
 
-#### Top-Bottom Surface
-_[Upcoming]_
+This project combines rule-based computer vision with AI instead of relying exclusively on an object-detection AI model throughout the inspection process. The goal is to reduce the computational burden of high-resolution image processing while improving inspection speed, accuracy, decision traceability, and maintainability. This approach also aligns with human-in-the-loop, high-speed inspection and precision-review, and layered rule–AI workflows publicly presented by semiconductor manufacturers and inspection-equipment providers.
 
+## Current Features
+
+#### Side Inspection
+
+Side inspection checks the die surface and shoulder balls (shoulder bumps) for damage. The process first converts the B page to grayscale, applies thresholding, and extracts the surface contour.
+
+1. Surface inspection
+   - Measures the first contact points from the top, bottom, left, and right edges.
+   - Selects the top and bottom cutting lines from the contact-point frequency and density distribution, helping compensate for slight rotation or uneven contour geometry.
+   - Calculates a separate pillar-based reference from the A page and applies both reference methods to identical coordinates on the A/B pages for crop comparison.
+
+2. Shoulder-ball inspection
+   - Scans downward from each x-coordinate of the bottom contour on the A page and detects the first white pixel as a side-ball candidate.
+   - The bottom contour range is divided into three sections, and the lowest point in each section is evaluated to select valid ball positions.
+   - Detected positions are displayed as square crop regions. A sample is classified as detected only when both a valid surface contour and valid ball positions are found.
+
+#### Top and Bottom Surface Inspection
+
+_Planned for a future release._
 
 ## Project Structure
 
 ```text
-
 ├── app.py             # Starts the PyQt5 application
-├── ui.py              # Displays A- and B-page results together 
-├── contour.py         # B-page contour 
-├── styles.py          # UI styles (created by Claude)
+├── ui.py              # Main window layout, state, and user interaction
+├── ui_components.py   # Reusable image, histogram, and modal widgets
+├── general.py         # Shared image I/O, capture-path, and notes helpers
+├── contour.py         # Detection-independent contour extraction and geometry
+├── side/
+│   ├── pipeline.py    # Orchestrates the complete Side detection flow
+│   ├── surface.py     # Side surface detection and crop previews
+│   └── ball.py        # Side ball detection
+├── styles.py          # UI styles
 ├── requirements.txt   # Python dependencies
-├── assets/            # Application icon and other assets
-└── dataset/            
-
+├── assets/            # Application icons and other resources
+└── dataset/           # Inspection image data
 ```
 
 ## Requirements
 
 - Python 3.10–3.12 recommended
-- Input `TIFF` images must contain A/B pages with identical dimensions (specific Dataset)
+- Input `TIFF` images must contain identically sized A/B pages. The program assumes a specific dataset format.
 
 ## Installation
 
@@ -57,10 +77,10 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-## 실행
+## Run
 
 ```bash
 python app.py
 ```
 
-> Note: Since this repository is a program designed for specific experimental research, it may not be suitable for your project.
+> This repository was developed for specific experimental research and may not be suitable for other projects.

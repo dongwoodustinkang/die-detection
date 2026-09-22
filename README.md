@@ -25,8 +25,24 @@ Side inspection checks the die surface and shoulder balls (shoulder bumps) for d
    - Scans downward from each x-coordinate of the bottom contour on the A page and detects the first white pixel as a side-ball candidate.
    - The bottom contour range is divided into three sections, and the lowest point in each section is evaluated to select valid ball positions.
    - Detected positions are displayed as square crop regions. A sample is classified as detected only when both a valid surface contour and valid ball positions are found.
+   - The **원호 비교** (arc comparison) toggle beside the ball preview switches between the original crop (off) and lower-arc analysis (on), cached per image.
+   - Analysis applies mild unsharp masking and inverse Otsu thresholding to the same A-page crop, selects the lower central dark component, and scans upward in each column. A circle with radius **10–20 original pixels** is fitted to the lower outline within 20 px of its tip, excluding the upper surface band.
+   - R is radius, E is radial RMSE, and S is the mean mirrored lower-profile height difference, all in original pixels. Cyan dots show measured points; the circle/cross show the fit. Experimental review limits are E > 1.5 px, S > 2 px, angular support < 70°, or column continuity < 90%; crop clipping, radius-limit hits and points above the lower arc also trigger review. Insufficient points/curvature remain unmeasurable.
+   - These are experimental measurements, not `4πA/P²` circularity or final OK/NG classification. The main detection status retains the existing position criteria. Upper attachments are not evaluated, and limits need validation against labeled samples.
 
-#### Top and Bottom Surface Inspection
+#### Bottom Inspection · Chip Location and Circle Candidates
+
+- Only `Bottom Detection` processes page A for this flow. Page B is an original reference.
+- A 3×3 Gaussian blur and threshold `max(background + 20, (background + Otsu) / 2)` separate the chip, including its gray substrate.
+- Six 40×40 px ROIs follow the chip position and rotation: 10%/90% across its width and 10%/50%/90% down its height.
+- Dark components are extracted from the binary image before closing or filling its interior. External background and components smaller than 10 px² are excluded.
+- Circle candidate conditions: **contour area 300–450 px², circularity ≥ 0.70, short/long side ratio ≥ 0.70, and distance from the expected ROI center ≤ 12 px**. Circularity is `4π × area / perimeter²`.
+- Rejected components retain their actual contours and review reasons; empty ROIs remain missing. Components touching the search boundary and multiple qualifying components also require review.
+- A shows the ROIs and actual contours: green for candidates, orange for review, red for missing. Detail captions use C for circularity and A for area. The chip outline rectangle and silhouette panel stay hidden.
+- The status distinguishes six candidate regions from results requiring review. **Candidate acceptance is not a product pass/fail classification.**
+- The detector assumes one rectangular chip on a dark background and rejects clipped, small, or elongated chips. Original A pixels and the original crop remain unchanged.
+
+#### Top Surface Inspection
 
 _Planned for a future release._
 
@@ -38,6 +54,9 @@ _Planned for a future release._
 ├── ui_components.py   # Reusable image, histogram, and modal widgets
 ├── general.py         # Shared image I/O, capture-path, and notes helpers
 ├── contour.py         # Detection-independent contour extraction and geometry
+├── bottom/
+│   ├── pipeline.py    # A thresholding, chip location, and circle pipeline
+│   └── circles.py     # Six ROIs, dark components, candidate rules, and previews
 ├── side/
 │   ├── pipeline.py    # Orchestrates the complete Side detection flow
 │   ├── surface.py     # Side surface detection and crop previews
@@ -47,6 +66,8 @@ _Planned for a future release._
 ├── assets/            # Application icons and other resources
 └── dataset/           # Inspection image data
 ```
+
+Verify chip localization, circle candidates, and mode switching with `python -m unittest discover -s tests -v`.
 
 ## Requirements
 

@@ -18,12 +18,10 @@ from .ball import (
     create_ball_square_crop_preview,
     draw_ball_squares,
     find_downward_contour_white_points,
-    get_bottom_contour_x_range,
     get_bottom_contour_y_by_x,
-    get_bottommost_point_count,
-    get_bottommost_points_by_thirds,
-    select_detected_bottommost_points,
+    get_distant_bottommost_points,
 )
+from .ball_arc import BallArcMeasurement, analyze_ball_crops, create_ball_arc_preview
 from .surface import (
     CONTOUR_COLOR,
     SOURCE_PREVIEW_MASK_MODE,
@@ -72,6 +70,9 @@ class SideDetectionResult:
     )
     ball_square_crop_preview: Optional[np.ndarray] = None
     ball_square_surface_bottom_y_by_x: Dict[int, int] = field(default_factory=dict)
+    ball_arc_measurements: List[BallArcMeasurement] = field(default_factory=list)
+    ball_arc_preview: Optional[np.ndarray] = None
+    ball_arc_ms: Optional[float] = None
     pillar_with_ball_ms: float = 0.0
     frequency_with_ball_ms: float = 0.0
 
@@ -88,6 +89,20 @@ class _SurfaceCutAnalysis:
     top_boundary: Optional[dict]
     bottom_boundary: Optional[dict]
     elapsed_seconds: float
+
+
+def measure_ball_arcs(result):
+    """요청 시 한 번만 원호를 분석해 동일한 원본/크롭 결과와 비교한다."""
+    if result.ball_arc_ms is not None:
+        return
+    started_at = perf_counter()
+    if result.raw_image_a is not None:
+        result.ball_arc_measurements = analyze_ball_crops(
+            result.raw_image_a, result.selected_ball_bottommost_points,
+            result.ball_square_surface_bottom_y_by_x,
+        )
+    result.ball_arc_preview = create_ball_arc_preview(result.ball_arc_measurements)
+    result.ball_arc_ms = (perf_counter() - started_at) * 1000
 
 
 @dataclass
@@ -225,17 +240,8 @@ def _detect_ball(image_a, image_shape, result):
     result.a_ball_white_points = find_downward_contour_white_points(
         image_a, result.contours
     )
-    result.a_ball_bottommost_y, result.a_ball_bottommost_count = (
-        get_bottommost_point_count(result.a_ball_white_points)
-    )
-    bottom_contour_x_range = get_bottom_contour_x_range(
-        image_shape, result.contours
-    )
-    result.a_ball_bottommost_points_by_third = get_bottommost_points_by_thirds(
-        result.a_ball_white_points, bottom_contour_x_range
-    )
-    result.selected_ball_bottommost_points = select_detected_bottommost_points(
-        result.a_ball_bottommost_points_by_third
+    result.selected_ball_bottommost_points = get_distant_bottommost_points(
+        result.a_ball_white_points, min_x_distance=40, max_y_difference=10
     )
     result.ball_square_surface_bottom_y_by_x = get_bottom_contour_y_by_x(
         image_shape, result.contours
@@ -248,7 +254,7 @@ def _detect_ball(image_a, image_shape, result):
     return perf_counter() - started_at
 
 
-def _analyze_pillar_surface(image_a, image_shape, result):
+def _analyze_pillar_surface(image_a, image_shape, result, cuts=None):
     """기둥 기준점과 컨투어 접점을 계산하고 A 페이지에 표시한다."""
     started_at = perf_counter()
     pillar_reference_points = find_top_pillar_reference_points(image_a)
@@ -284,6 +290,7 @@ def _analyze_pillar_surface(image_a, image_shape, result):
         pillar_downward_points,
         pillar_downward_bright_points,
     )
+
     result.source_visualization = draw_ball_squares(
         source_visualization,
         result.selected_ball_bottommost_points,
@@ -374,7 +381,7 @@ def run_side_detection(image_path):
     cuts = _analyze_surface_cuts(result, gray.shape[1])
     result_image = _create_result_image(gray, result, cuts)
     ball_seconds = _detect_ball(image_a, gray.shape, result)
-    pillar = _analyze_pillar_surface(image_a, gray.shape, result)
+    pillar = _analyze_pillar_surface(image_a, gray.shape, result, cuts=cuts)
 
     started_at = perf_counter()
     result.analysis_preview = _create_pillar_preview(image_b, result, pillar)

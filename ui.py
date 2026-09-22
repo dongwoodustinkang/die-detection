@@ -1208,21 +1208,12 @@ class MainWindow(QMainWindow):
             lines.extend(result.density_log_lines)
 
             lines.extend(("", "[볼]"))
-            if result.a_ball_bottommost_y is None:
-                lines.append("A 페이지 하면 검출점 최하단 : 없음")
+            if not result.selected_ball_bottommost_points:
+                lines.append("검출된 볼 좌표 : 없음")
             else:
-                lines.append(
-                    "A 페이지 하면 검출점 최하단 "
-                    f"y={result.a_ball_bottommost_y} : "
-                    f"{result.a_ball_bottommost_count}개"
-                )
-            for section_index, point in enumerate(
-                result.a_ball_bottommost_points_by_third, start=1
-            ):
-                point_text = "없음" if point is None else f"({point[0]}, {point[1]})"
-                lines.append(
-                    f"하면 {section_index}등분 최하단 좌표 : {point_text}"
-                )
+                lines.append(f"검출된 볼 개수 : {len(result.selected_ball_bottommost_points)}개")
+                for index, point in enumerate(result.selected_ball_bottommost_points, start=1):
+                    lines.append(f"볼 {index} 하단 좌표 : ({point[0]}, {point[1]})")
         self.program_log_lines = lines
         self.inspection_info_text = "\n".join(self.program_log_lines)
 

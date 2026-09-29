@@ -26,8 +26,8 @@ from PyQt5.QtWidgets import (
 
 from bottom.pipeline import run_bottom_detection
 from bottom.circles import (
-    MAX_CENTER_DISTANCE, MAX_CIRCLE_AREA, MIN_CIRCULARITY,
-    MIN_CIRCLE_AREA, MIN_CIRCLE_ASPECT_RATIO,
+    MAX_CENTER_DISTANCE_RATIO, MAX_CIRCLE_AREA_RATIO, MIN_CIRCULARITY,
+    MIN_CIRCLE_AREA_RATIO, MIN_CIRCLE_ASPECT_RATIO, ROI_SIDE_RATIO,
 )
 from contour import get_primary_contact_reference_point
 from general import NotesRepository, next_capture_path, to_bgr
@@ -180,8 +180,8 @@ class MainWindow(QMainWindow):
         self.result_label.setPixmap(QPixmap())
         self.result_label.setText("B 페이지 컨투어 분석 결과가 표시됩니다.")
         self.analysis_preview_label.setPixmap(QPixmap())
-        self.analysis_preview_label.setText("기둥 기준선을 같은 좌표로 적용한 A/B 페이지 크롭 결과를 비교합니다.")
-        self.analysis_preview_label.timing_label.setText("기둥 기준 + 볼 검출 · — ms")
+        self.analysis_preview_label.setText("상면은 기둥 기준, 하면은 최상단 빈도 기준선을 적용한 A/B 페이지 크롭 결과를 비교합니다.")
+        self.analysis_preview_label.timing_label.setText("기둥(상면)+빈도(하면) + 볼 검출 · — ms")
         self.source_preview_label.setPixmap(QPixmap())
         self.source_preview_label.setText("같은 회색 기준선을 적용한 A/B 페이지 크롭 결과를 비교합니다.")
         self.source_preview_label.timing_label.setText("최상단/빈도 + 볼 검출 · — ms")
@@ -207,7 +207,7 @@ class MainWindow(QMainWindow):
         self.analysis_card_title.setText("원 후보 · A 영상" if is_bottom else "상세 컨투어")
         self.bottom_chip_summary.setVisible(is_bottom)
         self.bottom_chip_summary.setText("칩 기준 6개 영역에서 원 후보를 찾습니다.")
-        self.source_preview_label.section_widget.setVisible(True)
+        self.source_preview_label.section_widget.setVisible(is_bottom)
         self.ball_crop_preview_label.section_widget.setVisible(not is_bottom)
         self.ball_arc_switch.setVisible(self.active_algorithm == "side")
         self.histogram_controls.setVisible(not is_bottom)
@@ -467,9 +467,9 @@ class MainWindow(QMainWindow):
 
         self.analysis_preview_label = self._create_preview_section(
             layout,
-            "기둥 기준 · A/B 크롭 비교",
-            "기둥 기준선을 같은 좌표로 적용한 A/B 페이지 크롭 결과를 비교합니다.",
-            timing_caption="기둥 기준 + 볼 검출",
+            "기둥(상면)·빈도(하면) 기준 · 크롭 비교",
+            "상면은 기둥 기준, 하면은 최상단 빈도 기준선을 적용한 A/B 페이지 크롭 결과를 비교합니다.",
+            timing_caption="기둥(상면)+빈도(하면) + 볼 검출",
         )
         self.source_preview_label = self._create_preview_section(
             layout,
@@ -871,8 +871,9 @@ class MainWindow(QMainWindow):
             "검사 단계  칩 위치 → 6개 ROI → 검은 성분 → 원 후보 조건 검사 (A 영상)",
             "원 후보 조건 통과는 양품 판정이 아닙니다.",
             f"칩 분리 임계값  {result.threshold:.1f}",
-            f"원 후보 기준  원형도 ≥ {MIN_CIRCULARITY:.2f}, 면적 {MIN_CIRCLE_AREA:g}–{MAX_CIRCLE_AREA:g} px², "
-            f"예상 ROI 중심에서 ≤ {MAX_CENTER_DISTANCE:g} px, 짧은 변/긴 변 ≥ {MIN_CIRCLE_ASPECT_RATIO:.2f}",
+            f"원 후보 기준  원형도 ≥ {MIN_CIRCULARITY:.2f}, 면적은 칩 면적의 {MIN_CIRCLE_AREA_RATIO:.2%}–{MAX_CIRCLE_AREA_RATIO:.2%}, "
+            f"예상 ROI 중심에서 칩 폭의 ≤ {MAX_CENTER_DISTANCE_RATIO:.2%}, ROI 한 변은 칩 변의 {ROI_SIDE_RATIO:.2%}, "
+            f"짧은 변/긴 변 ≥ {MIN_CIRCLE_ASPECT_RATIO:.2f}",
             "검색 경계에 닿거나 적합한 성분이 여러 개이면 검토 대상으로 표시합니다.",
         ]
         chip = result.chip
@@ -883,12 +884,27 @@ class MainWindow(QMainWindow):
             self.source_preview_label.setText("칩 위치가 없어 원 후보를 검사하지 않았습니다.")
         else:
             x, y, width, height = chip.bounding_rect
+            components = [region.primary for region in result.circle_regions]
+            circularities = ", ".join(
+                "--" if component is None else f"{component.circularity:.2f}"
+                for component in components
+            )
+            areas = ", ".join(
+                "--" if component is None else f"{component.area:.1f}"
+                for component in components
+            )
+            distances = ", ".join(
+                "--" if component is None else f"{component.center_distance:.2f}"
+                for component in components
+            )
+            min_area_px = chip.area * MIN_CIRCLE_AREA_RATIO
+            max_area_px = chip.area * MAX_CIRCLE_AREA_RATIO
             summary = (
                 f"원 후보 {result.candidate_count}/6 · 검토 {result.review_count} · 없음 {result.missing_count}\n"
-                f"중심 ({chip.center[0]:.1f}, {chip.center[1]:.1f}) px · "
-                f"기울기 {chip.angle_degrees:.2f}°\n"
-                f"초록: 원 후보 · 주황: 검토 · 빨강: 없음\n"
-                f"원형도 ≥ {MIN_CIRCULARITY:.2f} · 면적 {MIN_CIRCLE_AREA:g}–{MAX_CIRCLE_AREA:g} px² · 거리 ≤ {MAX_CENTER_DISTANCE:g} px"
+                f"원형도 ({circularities}) | 정상 기준 {MIN_CIRCULARITY:.2f} 이상\n"
+                f"면적 ({areas}) px² | 칩 면적의 {MIN_CIRCLE_AREA_RATIO:.2%} ~ {MAX_CIRCLE_AREA_RATIO:.2%}, "
+                f"즉 {min_area_px:.1f} px² ~ {max_area_px:.1f} px²\n"
+                f"거리 ({distances}) px | 칩 폭의 {MAX_CENTER_DISTANCE_RATIO:.2%} 이하"
             )
             lines.append(f"크롭 영역  x={x}, y={y}, 너비={width}, 높이={height} px")
             for name, point in zip(("좌상", "우상", "우하", "좌하"), chip.corners):
@@ -1030,12 +1046,14 @@ class MainWindow(QMainWindow):
         )
 
     def _show_preview_timings(self, result):
-        self.analysis_preview_label.timing_label.setText(
-            f"기둥 기준 + 볼 검출 · {result.pillar_with_ball_ms:.1f} ms"
-        )
-        self.source_preview_label.timing_label.setText(
-            f"최상단/빈도 + 볼 검출 · {result.frequency_with_ball_ms:.1f} ms"
-        )
+        if result.pillar_with_ball_ms is not None:
+            self.analysis_preview_label.timing_label.setText(
+                f"기둥(상면)+빈도(하면) + 볼 검출 · {result.pillar_with_ball_ms:.1f} ms"
+            )
+        if result.frequency_with_ball_ms is not None:
+            self.source_preview_label.timing_label.setText(
+                f"최상단/빈도 + 볼 검출 · {result.frequency_with_ball_ms:.1f} ms"
+            )
 
     def _on_histogram_side_changed(self, button):
         self.current_histogram_side = next(

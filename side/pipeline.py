@@ -25,7 +25,6 @@ from .ball_arc import BallArcMeasurement, analyze_ball_crops, create_ball_arc_pr
 from .surface import (
     CONTOUR_COLOR,
     SOURCE_PREVIEW_MASK_MODE,
-    append_density_log_when_merge_exists,
     create_polygon_preview,
     create_preview_comparison,
     draw_frequency_contact_points,
@@ -39,6 +38,7 @@ from .surface import (
     find_left_right_contour_reference_points,
     find_top_pillar_reference_points,
     get_concentrated_cut_line,
+    get_contour_side_reference_line,
     get_first_contact_side_lines,
     get_pillar_bottom_cut_line,
     get_pillar_outer_reference_points,
@@ -118,34 +118,9 @@ class _PillarAnalysis:
 
 
 def _create_base_result(image_a, image_b, gray):
-    """컨투어와 첫 접점을 계산해 Side 검출 결과의 공통 기반을 만든다."""
-    contours = find_b_contours(image_b)
-    result = SideDetectionResult(
-        raw_image_a=image_a,
-        raw_image_b=image_b,
-        contours=contours,
-        measurements=[
-            find_first_contact_points(contour, gray.shape)
-            for contour in contours
-        ],
-    )
-    result.center_split_x = get_contour_box_center_x(
-        contours, gray.shape[1]
-    )
-    append_density_log_when_merge_exists(
-        result,
-        "top_points",
-        result.center_split_x,
-        use_maximum=True,
-        side_name="상면",
-    )
-    append_density_log_when_merge_exists(
-        result,
-        "bottom_points",
-        result.center_split_x,
-        use_maximum=False,
-        side_name="하면",
-    )
+    contours = find_b_contours(image_b) # 표면 컨투어 추출
+    result = SideDetectionResult(raw_image_a=image_a, raw_image_b=image_b, contours=contours, measurements=[find_first_contact_points(contour, gray.shape) for contour in contours],) # 접점 계산.
+    result.center_split_x = get_contour_box_center_x( contours, gray.shape[1]) # 컨투어의 중앙위치를 기반으로 중심선 구함.
     return result
 
 
@@ -178,13 +153,12 @@ def _find_cut_boundary(
 
 
 def _record_density_log(result, boundary):
-    """컷선 계산 중 만들어진 밀집도 설명을 결과와 터미널에 남긴다."""
+    """컷선 계산 중 만들어진 밀집도 설명을 결과에 남긴다."""
     if boundary is None:
         return
     log_line = boundary.get("density_log_line")
     if log_line:
         result.density_log_lines.append(log_line)
-        print(log_line)
 
 
 def _analyze_surface_cuts(result, image_width):
@@ -269,14 +243,40 @@ def _analyze_pillar_surface(image_a, image_shape, result, cuts=None):
     left_contour_points, right_contour_points = (
         find_left_right_contour_reference_points(contour_outline)
     )
-    left_reference_line, right_reference_line = get_first_contact_side_lines(
-        result.measurements, image_shape[0]
+    left_reference_line = get_contour_side_reference_line(
+        left_contour_points, image_shape[0]
     )
+    right_reference_line = get_contour_side_reference_line(
+        right_contour_points, image_shape[0]
+    )
+    if not left_reference_line or not right_reference_line:
+        left_reference_line, right_reference_line = get_first_contact_side_lines(
+            result.measurements, image_shape[0]
+        )
     pillar_downward_bright_points = find_contour_contact_color_change_points(
         image_a, pillar_downward_points, contour_outline
     )
     pillar_contour_contact_points = find_contour_contact_points(
         pillar_downward_points, contour_outline
+    )
+
+    if len(pillar_downward_points) == 2:
+        top_cut_line = pillar_downward_points
+    elif len(pillar_downward_points) == 1:
+        point_y = pillar_downward_points[0][1]
+        top_cut_line = ((0, point_y), (image_shape[1] - 1, point_y))
+    else:
+        top_cut_line = None
+
+    frequency_bottom_cut_line = (
+        (cuts.bottom_boundary or {}).get("extended_line") if cuts else None
+    )
+    bottom_cut_line = (
+        frequency_bottom_cut_line
+        if frequency_bottom_cut_line is not None
+        else get_pillar_bottom_cut_line(
+            pillar_contour_contact_points, image_shape[1]
+        )
     )
 
     source_visualization = to_bgr(image_a)
@@ -289,23 +289,13 @@ def _analyze_pillar_surface(image_a, image_shape, result, cuts=None):
         pillar_reference_points,
         pillar_downward_points,
         pillar_downward_bright_points,
+        bottom_cut_line=bottom_cut_line,
     )
 
     result.source_visualization = draw_ball_squares(
         source_visualization,
         result.selected_ball_bottommost_points,
         result.ball_square_surface_bottom_y_by_x,
-    )
-
-    if len(pillar_downward_points) == 2:
-        top_cut_line = pillar_downward_points
-    elif len(pillar_downward_points) == 1:
-        point_y = pillar_downward_points[0][1]
-        top_cut_line = ((0, point_y), (image_shape[1] - 1, point_y))
-    else:
-        top_cut_line = None
-    bottom_cut_line = get_pillar_bottom_cut_line(
-        pillar_contour_contact_points, image_shape[1]
     )
     return _PillarAnalysis(
         source_preview_image=to_bgr(image_a),
@@ -318,7 +308,7 @@ def _analyze_pillar_surface(image_a, image_shape, result, cuts=None):
 
 
 def _create_pillar_preview(image_b, result, pillar):
-    """기둥 기준의 A/B Crop 비교 이미지를 만든다."""
+    """기둥(상면)·빈도(하면) 기준의 A/B Crop 비교 이미지를 만든다."""
     a_preview = create_polygon_preview(
         pillar.source_preview_image,
         result.contours,
@@ -338,31 +328,6 @@ def _create_pillar_preview(image_b, result, pillar):
         bottom_cut_line=pillar.bottom_cut_line,
         left_reference_line=pillar.left_reference_line,
         right_reference_line=pillar.right_reference_line,
-    )
-    return create_preview_comparison(
-        a_preview, "A Page crop", b_preview, "B Page crop"
-    )
-
-
-def _create_frequency_preview(image_b, result, pillar, cuts):
-    """최상단/빈도 기준의 A/B Crop 비교 이미지를 만든다."""
-    top_cut_line = (cuts.top_boundary or {}).get("extended_line")
-    bottom_cut_line = (cuts.bottom_boundary or {}).get("extended_line")
-    a_preview = create_polygon_preview(
-        pillar.source_preview_image,
-        result.contours,
-        result.measurements,
-        SOURCE_PREVIEW_MASK_MODE,
-        top_cut_line=top_cut_line,
-        bottom_cut_line=bottom_cut_line,
-    )
-    b_preview = create_polygon_preview(
-        image_b,
-        result.contours,
-        result.measurements,
-        SOURCE_PREVIEW_MASK_MODE,
-        top_cut_line=top_cut_line,
-        bottom_cut_line=bottom_cut_line,
     )
     return create_preview_comparison(
         a_preview, "A Page crop", b_preview, "B Page crop"
@@ -370,31 +335,43 @@ def _create_frequency_preview(image_b, result, pillar, cuts):
 
 
 def run_side_detection(image_path):
-    """Side 검출을 실행하고 화면 표시용 이미지와 결과를 반환한다."""
+    image_a, image_b = load_ab_tiff_pages(image_path) # 이미지 불러오기
 
-    image_a, image_b = load_ab_tiff_pages(image_path)
+    # 두 이미지의 크기가 일치하지 않는 경우
     if image_a.shape[:2] != image_b.shape[:2]:
         raise ValueError(f"A/B 페이지 크기가 일치하지 않습니다: {image_path}")
 
+    # B 페이지를 그레이스케일로 변환
     gray = to_grayscale(image_b)
+    
+    # B 페이지의 표면 컨투어 추출
     result = _create_base_result(image_a, image_b, gray)
+    
+    # 하면 기준 컷선 산출(최상단/빈도 계산 기반)
     cuts = _analyze_surface_cuts(result, gray.shape[1])
     result_image = _create_result_image(gray, result, cuts)
-    ball_seconds = _detect_ball(image_a, gray.shape, result)
+
+    # 상면 기준 기둥 탐색 및 시각화(기둥 계산 기반)
     pillar = _analyze_pillar_surface(image_a, gray.shape, result, cuts=cuts)
 
-    started_at = perf_counter()
+    # 볼 검출
+    ball_seconds = _detect_ball(image_a, gray.shape, result)
+
+
+    started_at = perf_counter() # 알고리즘 소요 시간 계산(ms)
     result.analysis_preview = _create_pillar_preview(image_b, result, pillar)
-    pillar_seconds = pillar.elapsed_seconds + (perf_counter() - started_at)
 
-    started_at = perf_counter()
-    result.source_preview = _create_frequency_preview(
-        image_b, result, pillar, cuts
+    # 표면 분석 소요 시간 합산
+    # 상단 + 하면 + 크롭 미리보기 이미지 합성 시간 
+    pillar_seconds = (
+        pillar.elapsed_seconds + cuts.elapsed_seconds + (perf_counter() - started_at)
     )
-    frequency_seconds = cuts.elapsed_seconds + (perf_counter() - started_at)
 
+    # A컷 이미지 준비
+    result.source_preview = None 
+    # 최종 결과 반환
     result.pillar_with_ball_ms = (pillar_seconds + ball_seconds) * 1000
-    result.frequency_with_ball_ms = (frequency_seconds + ball_seconds) * 1000
+    result.frequency_with_ball_ms = None
     return result_image, result
 
 

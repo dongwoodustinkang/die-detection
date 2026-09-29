@@ -137,7 +137,6 @@ class TopContourHistogram(QWidget):
             f"{ratio_count}개"
         )
         self.log_lines.append(ratio_log_line)
-        print(ratio_log_line)
         for peak_coordinate in peak_coordinates:
             peak_coordinate = int(peak_coordinate)
             previous_count = int(count_by_coordinate.get(peak_coordinate - 1, 0))
@@ -151,7 +150,6 @@ class TopContourHistogram(QWidget):
                 f"{next_count}개"
             )
             self.log_lines.append(coordinate_log_line)
-            print(coordinate_log_line)
             for coordinate, count in (
                 (peak_coordinate - 1, previous_count),
                 (peak_coordinate + 1, next_count),
@@ -159,20 +157,12 @@ class TopContourHistogram(QWidget):
                 if count <= ratio_count:
                     continue
 
-                print(
-                    f"[히스토그램] {self.coordinate_axis}={coordinate} 접점 수({count}개)가 "
-                    f"max_count_ratio 값({ratio_count}개)보다 큽니다: Merge 가능"
-                )
                 next_coordinate = coordinate + (1 if coordinate > peak_coordinate else -1)
                 next_count = int(count_by_coordinate.get(next_coordinate, 0))
                 comparison = (
                     "큽니다" if next_count > ratio_count
                     else "작습니다" if next_count < ratio_count
                     else "같습니다"
-                )
-                print(
-                    f"[히스토그램] {self.coordinate_axis}={next_coordinate} 접점 수({next_count}개)는 "
-                    f"max_count_ratio 값({ratio_count}개)보다 {comparison}."
                 )
 
         if self.histogram_side not in {"top", "bottom"}:
@@ -202,10 +192,6 @@ class TopContourHistogram(QWidget):
             else min(highlighted_coordinates)
         )
         side_name = "상판" if self.histogram_side == "top" else "하판"
-        print(
-            f"[히스토그램] {side_name} 중심 컷 좌표 : "
-            f"{self.coordinate_axis}={center_coordinate}"
-        )
 
     def paintEvent(self, event):
         super().paintEvent(event)

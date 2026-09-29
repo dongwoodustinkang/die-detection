@@ -407,6 +407,24 @@ def get_pillar_bottom_cut_line(points, image_width):
     return ((0, bottom_y), (image_width - 1, bottom_y))
 
 
+def get_contour_side_reference_line(points, image_height):
+    """컨투어 좌·우 접점 좌표를 이미지 상·하 끝(y=0 ~ y=height-1)까지 연장한 세로선 좌표를 반환한다."""
+    if not points:
+        return None
+    if len(points) == 1:
+        x = points[0][0]
+        return ((x, 0), (x, image_height - 1))
+    (x1, y1), (x2, y2) = points[0], points[1]
+    if y1 == y2 or x1 == x2:
+        x = min(x1, x2)
+        return ((x, 0), (x, image_height - 1))
+
+    slope_x = (x2 - x1) / (y2 - y1)
+    x_top = int(round(x1 + (0 - y1) * slope_x))
+    x_bottom = int(round(x1 + (image_height - 1 - y1) * slope_x))
+    return ((x_top, 0), (x_bottom, image_height - 1))
+
+
 def find_left_right_contour_reference_points(contour_outline):
     """상·하 반에서 윤곽의 가장 바깥 좌·우 접점을 찾는다."""
 
@@ -434,13 +452,15 @@ def find_left_right_contour_reference_points(contour_outline):
 
 
 def draw_left_right_contour_reference_lines(image, left_points, right_points):
-    """A 페이지에 컨투어 좌·우 접점과 세로 방향 기준선을 표시한다."""
+    """A 페이지에 컨투어 좌·우 접점과 연장된 세로 방향 기준선을 표시한다."""
 
     preview = to_bgr(image)
+    image_height = preview.shape[0]
     for points in (left_points, right_points):
-        if len(points) == 2:
+        line = get_contour_side_reference_line(points, image_height)
+        if line is not None:
             cv2.line(
-                preview, points[0], points[1], PILLAR_DOWNWARD_COLOR, 1, cv2.LINE_AA
+                preview, line[0], line[1], PILLAR_DOWNWARD_COLOR, 1, cv2.LINE_AA
             )
         for point in points:
             cv2.circle(
@@ -455,16 +475,18 @@ def draw_left_right_contour_reference_lines(image, left_points, right_points):
 
 
 def draw_top_pillar_reference_points(
-    image, reference_points, downward_points=(), downward_bright_points=()
+    image,
+    reference_points,
+    downward_points=(),
+    downward_bright_points=(),
+    bottom_cut_line=None,
 ):
-    """원본 A 페이지에 좌우 색 변화 기준점과 필요한 수평선을 표시한다."""
+    """원본 A 페이지에 좌우 색 변화 기준점과 연장된 상·하단 수평선을 표시한다."""
 
     preview = to_bgr(image)
     if reference_points is None:
         return preview
 
-    # 변화 좌표보다 바깥쪽 x 위치에서 밝기 250~255인 지점에 회색 점을 표시한다.
-    # 좌측: x₁ - 5px, 우측: x₂ + 5px (이미지 범위를 벗어나지 않게 제한)
     display_points = get_pillar_outer_reference_points(
         preview, reference_points
     )
@@ -481,20 +503,23 @@ def draw_top_pillar_reference_points(
     if downward_points:
         if len(downward_points) == 1:
             point = downward_points[0]
-            left_point = (0, point[1])
-            right_point = (preview.shape[1] - 1, point[1])
+            top_line = ((0, point[1]), (preview.shape[1] - 1, point[1]))
         else:
             left_point, right_point = sorted(downward_points, key=lambda point: point[0])
-        line_y = round((left_point[1] + right_point[1]) / 2)
-        cv2.line(
-            preview,
-            (left_point[0], line_y),
-            (right_point[0], line_y),
-            PILLAR_DOWNWARD_COLOR,
-            thickness=1,
-            lineType=cv2.LINE_AA,
-        )
-        # 선을 먼저 그린 뒤 검출된 하늘색 점을 덮어 그린다.
+            top_line = extend_line_to_image_edges(
+                (left_point, right_point), preview.shape[1]
+            )
+
+        if top_line is not None:
+            cv2.line(
+                preview,
+                top_line[0],
+                top_line[1],
+                PILLAR_DOWNWARD_COLOR,
+                thickness=1,
+                lineType=cv2.LINE_AA,
+            )
+
         for point in downward_points:
             cv2.circle(
                 preview,
@@ -505,30 +530,33 @@ def draw_top_pillar_reference_points(
                 lineType=cv2.LINE_AA,
             )
 
-    # 하늘색 점 아래의 컨투어 접점에서 색이 변하는 지점은 더 연한 하늘색으로 표시한다.
-    downward_points_by_x = {point[0]: point for point in downward_points}
-    bottom_cut_line = get_pillar_horizontal_cut_line(
-        downward_bright_points, preview.shape[1]
-    )
     if bottom_cut_line is not None:
-        cv2.line(
-            preview,
-            *bottom_cut_line,
-            PILLAR_DOWNWARD_BRIGHT_POINT_COLOR,
-            thickness=1,
-            lineType=cv2.LINE_AA,
+        extended_bottom = extend_line_to_image_edges(
+            bottom_cut_line, preview.shape[1]
         )
-    for point in downward_bright_points:
-        source_point = downward_points_by_x.get(point[0])
-        if source_point is not None:
+        if extended_bottom is not None:
             cv2.line(
                 preview,
-                source_point,
-                point,
+                extended_bottom[0],
+                extended_bottom[1],
                 PILLAR_DOWNWARD_BRIGHT_POINT_COLOR,
                 thickness=1,
                 lineType=cv2.LINE_AA,
             )
+    else:
+        pillar_bottom = get_pillar_horizontal_cut_line(
+            downward_bright_points, preview.shape[1]
+        )
+        if pillar_bottom is not None:
+            cv2.line(
+                preview,
+                *pillar_bottom,
+                PILLAR_DOWNWARD_BRIGHT_POINT_COLOR,
+                thickness=1,
+                lineType=cv2.LINE_AA,
+            )
+
+    for point in downward_bright_points:
         cv2.circle(
             preview,
             point,
@@ -537,7 +565,6 @@ def draw_top_pillar_reference_points(
             thickness=cv2.FILLED,
             lineType=cv2.LINE_AA,
         )
-    # 세로선이 시작 하늘색 점을 덮지 않도록 마지막에 다시 표시한다.
     for point in downward_points:
         cv2.circle(
             preview,
@@ -811,7 +838,6 @@ def append_density_log_when_merge_exists(
     )
     if log_line:
         result.density_log_lines.append(log_line)
-        print(log_line)
 
 
 def get_concentrated_cut_line(

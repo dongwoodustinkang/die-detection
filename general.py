@@ -17,8 +17,8 @@ def to_grayscale(image):
     if image.ndim == 2:
         return image.copy()
     if image.shape[2] == 4:
-        return cv2.cvtColor(image, cv2.COLOR_BGRA2GRAY)
-    return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        return cv2.cvtColor(image, cv2.COLOR_BGRA2GRAY) # 4채널 -> 1채널
+    return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) # 3채널 -> 1채널
 
 
 def to_bgr(image):

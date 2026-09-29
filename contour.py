@@ -9,8 +9,10 @@ import numpy as np
 from general import to_grayscale
 
 
+# 컨투어 면적 범위
 MIN_CONTOUR_AREA = 3500
 MAX_CONTOUR_AREA = 10000
+
 TOP_BOTTOM_SAMPLE_COUNT = 15
 LEFT_RIGHT_SAMPLE_COUNT = 5
 CONTACT_POINT_MODE = "full"
@@ -55,7 +57,7 @@ def find_b_contours(image_b):
     _, thresh = cv2.threshold(gray,0,255,cv2.THRESH_BINARY + cv2.THRESH_OTSU,) # 이진화
     contours, _ = cv2.findContours(thresh,cv2.RETR_EXTERNAL,cv2.CHAIN_APPROX_SIMPLE,) # 컨투어링 작업
 
-    # 범위내 컨투어 검출
+    # 범위내 컨투어 검출 (컨투어 면적을 초과하거나 미만인 개체는 대상이 아님)
     filtered_contours = [
         con for con in contours
         if MIN_CONTOUR_AREA <= cv2.contourArea(con) <= MAX_CONTOUR_AREA
@@ -89,7 +91,7 @@ def find_first_contact_points(contour, image_shape):
 
     # 채워진 내부 면적이 아니라 실제 외곽선만 사용한다. 히스토그램과 기준선은
     # 내부 픽셀이 아닌 각 방향에서 외곽선을 처음 만나는 지점만 사용한다.
-    boundary_mask = np.zeros((image_height, image_width), dtype=np.uint8)
+    boundary_mask = np.zeros((image_height, image_width), dtype=np.uint8) # 
     cv2.drawContours(
         boundary_mask,
         [contour],

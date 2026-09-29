@@ -78,13 +78,14 @@ APP_STYLESHEET = """
         max-width: 24px; max-height: 24px; padding: 0;
     }
     QPushButton#infoButton:hover { background: rgba(10, 132, 255, 0.20); }
-    QPushButton#imageOverlaySwitch {
+    QPushButton#imageOverlaySwitch, QPushButton#ballArcSwitch {
         background: rgba(118, 118, 128, 0.12); border: 0; border-radius: 11px; color: #6E6E73;
         font-size: 11px; font-weight: 700; min-width: 46px; min-height: 24px;
         max-height: 24px; padding: 0 8px;
     }
-    QPushButton#imageOverlaySwitch:checked { background: rgba(10, 132, 255, 0.15); color: #007AFF; }
-    QPushButton#imageOverlaySwitch:hover { background: rgba(10, 132, 255, 0.20); color: #007AFF; }
+    QPushButton#imageOverlaySwitch:checked, QPushButton#ballArcSwitch:checked { background: rgba(10, 132, 255, 0.15); color: #007AFF; }
+    QPushButton#imageOverlaySwitch:hover, QPushButton#ballArcSwitch:hover { background: rgba(10, 132, 255, 0.20); color: #007AFF; }
+    QLabel#ballArcSummary { color: #48484A; font-size: 11px; padding: 2px; }
     QLabel#imagePaneTitle, QLabel#previewTitle { color: #48484A; font-size: 12px; font-weight: 600; padding-left: 2px; }
     QLabel#previewTiming {
         color: #007AFF; font-size: 10px; font-weight: 700;

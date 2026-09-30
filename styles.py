@@ -122,6 +122,11 @@ APP_STYLESHEET = """
     QPushButton#ballCountSegmentButton { background: transparent; border: 0; border-radius: 6px; color: #6E6E73; font-size: 13px; font-weight: 700; min-height: 28px; min-width: 30px; padding: 0 5px; }
     QPushButton#ballCountSegmentButton:hover { color: #007AFF; }
     QPushButton#ballCountSegmentButton:checked { background: rgba(255, 255, 255, 235); color: #007AFF; }
+    QFrame#ballViewSelector { background: rgba(118, 118, 128, 0.10); border: 1px solid rgba(60, 60, 67, 0.08); border-radius: 9px; }
+    QLabel#ballViewLabel { color: #8E8E93; font-size: 9px; font-weight: 700; }
+    QPushButton#ballViewButton { background: transparent; border: 0; border-radius: 6px; color: #6E6E73; font-size: 10px; font-weight: 600; min-height: 21px; padding: 0 5px; }
+    QPushButton#ballViewButton:hover { color: #007AFF; }
+    QPushButton#ballViewButton:checked { background: #FFFFFF; color: #007AFF; }
     QPushButton#sideCuttingSwitch { background: rgba(120, 120, 128, 0.26); border: 0; border-radius: 14px; color: #FFFFFF; font-size: 10px; font-weight: 700; min-height: 28px; min-width: 48px; max-height: 28px; max-width: 48px; padding: 0; }
     QPushButton#sideCuttingSwitch:checked { background: #34C759; color: #FFFFFF; }
     QPushButton#sideCuttingSwitch:hover { background: rgba(120, 120, 128, 0.38); }

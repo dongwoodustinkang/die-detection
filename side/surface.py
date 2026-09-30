@@ -452,16 +452,10 @@ def find_left_right_contour_reference_points(contour_outline):
 
 
 def draw_left_right_contour_reference_lines(image, left_points, right_points):
-    """A 페이지에 컨투어 좌·우 접점과 연장된 세로 방향 기준선을 표시한다."""
+    """A 페이지에 컨투어 좌·우 접점만 표시한다."""
 
     preview = to_bgr(image)
-    image_height = preview.shape[0]
     for points in (left_points, right_points):
-        line = get_contour_side_reference_line(points, image_height)
-        if line is not None:
-            cv2.line(
-                preview, line[0], line[1], PILLAR_DOWNWARD_COLOR, 1, cv2.LINE_AA
-            )
         for point in points:
             cv2.circle(
                 preview,

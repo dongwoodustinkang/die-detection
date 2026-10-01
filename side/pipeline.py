@@ -64,6 +64,9 @@ from .surface import (
 
 # 임시 실험: False로 바꾸면 Page A 크롭 재검출을 사용하지 않는다.
 USE_CROPPED_PAGE_A_FALLBACK = True
+# 임시 실험: True면 처음부터 A 상단 기준선 아래로 자른 B에서 컨투어를 따서
+# 하단 기준선을 만든다. False로 바꾸면 기존(B 전체 → 실패 시 크롭) 흐름으로 돌아간다.
+USE_TOP_CROPPED_PAGE_B = True
 
 
 @dataclass
@@ -456,8 +459,14 @@ def run_side_detection(image_path, ball_slot_count=3):
     result = _create_base_result(image_a, image_b, gray)
     
     # 하면 기준 컷선 산출(최상단/빈도 계산 기반)
+    if USE_TOP_CROPPED_PAGE_B:
+        # A 상단 기준선 아래 B 크롭 컨투어로 교체한다(실패하면 B 전체 컨투어 유지).
+        _retry_surface_from_page_a(image_a, result, gray.shape)
     cuts = _analyze_surface_cuts(result, gray.shape[1])
-    if USE_CROPPED_PAGE_A_FALLBACK and cuts.bottom_boundary is None:
+    if (
+        USE_CROPPED_PAGE_A_FALLBACK and not result.used_cropped_page_a
+        and cuts.bottom_boundary is None
+    ):
         if _retry_surface_from_page_a(image_a, result, gray.shape):
             cuts = _analyze_surface_cuts(result, gray.shape[1])
     result_image = _create_result_image(gray, result, cuts)

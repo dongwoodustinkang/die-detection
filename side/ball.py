@@ -68,11 +68,19 @@ def get_surface_slot_ranges(
 ) -> List[Tuple[int, int]]:
     """표면 하면의 가로 범위를 균등한 검사 슬롯으로 분할한다."""
 
-    if slot_count <= 0 or not surface_bottom_y_by_x:
+    if not surface_bottom_y_by_x:
+        return []
+    return split_slot_ranges(
+        min(surface_bottom_y_by_x), max(surface_bottom_y_by_x), slot_count
+    )
+
+
+def split_slot_ranges(left: int, right: int, slot_count: int) -> List[Tuple[int, int]]:
+    """좌·우 x 범위를 균등한 검사 슬롯으로 분할한다."""
+
+    if slot_count <= 0 or right < left:
         return []
 
-    left = min(surface_bottom_y_by_x)
-    right = max(surface_bottom_y_by_x)
     width = right - left + 1
     return [
         (

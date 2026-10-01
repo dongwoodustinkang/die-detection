@@ -31,6 +31,7 @@ from .ball import (
     get_bottom_contour_y_by_x,
     get_surface_slot_ranges,
     get_surface_slot_boundaries,
+    split_slot_ranges,
 )
 from .surface import (
     CONTOUR_COLOR,
@@ -38,6 +39,7 @@ from .surface import (
     apply_side_cutting_mask,
     create_polygon_preview,
     create_preview_comparison,
+    crop_polygon_tile,
     draw_frequency_contact_points,
     draw_left_right_contour_reference_lines,
     draw_side_cutting_boundary,
@@ -47,6 +49,8 @@ from .surface import (
     find_contour_contact_points,
     find_downward_color_change_points,
     find_left_right_contour_reference_points,
+    find_page_a_band_contours,
+    get_page_a_bottom_x_range,
     find_top_pillar_reference_points,
     get_concentrated_cut_line,
     get_contour_side_reference_line,
@@ -60,6 +64,9 @@ from .surface import (
 
 # 임시 실험: False로 바꾸면 Page A 크롭 재검출을 사용하지 않는다.
 USE_CROPPED_PAGE_A_FALLBACK = True
+# 임시 실험: True면 처음부터 A 상단 기준선 아래로 자른 B에서 컨투어를 따서
+# 하단 기준선을 만든다. False로 바꾸면 기존(B 전체 → 실패 시 크롭) 흐름으로 돌아간다.
+USE_TOP_CROPPED_PAGE_B = True
 
 
 @dataclass
@@ -69,6 +76,7 @@ class SideDetectionResult:
     raw_image_a: Optional[np.ndarray] = None
     raw_image_b: Optional[np.ndarray] = None
     contours: List[np.ndarray] = field(default_factory=list)
+    page_a_contours: List[np.ndarray] = field(default_factory=list)
     used_cropped_page_a: bool = False
     fallback_pillar_x_range: Optional[Tuple[int, int]] = None
     measurements: List[ContourMeasurement] = field(default_factory=list)
@@ -111,6 +119,7 @@ class _PillarAnalysis:
     left_reference_line: Tuple[Tuple[int, int], ...]
     right_reference_line: Tuple[Tuple[int, int], ...]
     elapsed_seconds: float
+    page_a_contour: Optional[np.ndarray] = None
 
 
 def _create_base_result(image_a, image_b, gray):
@@ -350,9 +359,19 @@ def _analyze_pillar_surface(image_a, image_shape, result, cuts=None):
         )
     )
 
+    # 상단~하단 기준선 사이에서 A 페이지 컨투어를 다시 따서 표시한다.
+    result.page_a_contours = find_page_a_band_contours(
+        image_a, top_cut_line, bottom_cut_line
+    )
+    page_a_contour = (
+        max(result.page_a_contours, key=cv2.contourArea)
+        if result.page_a_contours else None
+    )
     source_visualization = to_bgr(image_a)
+    cv2.drawContours(
+        source_visualization, result.page_a_contours, -1, CONTOUR_COLOR, 1
+    )
     if not result.used_cropped_page_a:
-        cv2.drawContours(source_visualization, result.contours, -1, CONTOUR_COLOR, 1)
         source_visualization = draw_left_right_contour_reference_lines(
             source_visualization, left_contour_points, right_contour_points
         )
@@ -365,9 +384,6 @@ def _analyze_pillar_surface(image_a, image_shape, result, cuts=None):
     )
 
     result.source_visualization = source_visualization
-    draw_surface_slot_guides(
-        result.source_visualization, result.ball_slot_ranges, bottom_cut_line
-    )
     return _PillarAnalysis(
         source_preview_image=to_bgr(image_a),
         top_cut_line=top_cut_line,
@@ -375,11 +391,35 @@ def _analyze_pillar_surface(image_a, image_shape, result, cuts=None):
         left_reference_line=left_reference_line,
         right_reference_line=right_reference_line,
         elapsed_seconds=perf_counter() - started_at,
+        page_a_contour=page_a_contour,
+    )
+
+
+def _fit_slot_ranges_to_page_a(result, pillar):
+    """A 컨투어 하단의 좌·우 끝 사이로 슬롯 구간을 다시 나눈다."""
+    if pillar.page_a_contour is None:
+        return
+    x_range = get_page_a_bottom_x_range(
+        pillar.page_a_contour, pillar.source_preview_image.shape
+    )
+    if x_range is None:
+        return
+    result.ball_slot_ranges = split_slot_ranges(
+        *x_range,
+        3 if result.ball_slot_count == 2 else result.ball_slot_count,
     )
 
 
 def _create_pillar_preview(image_b, result, pillar):
     """기둥(상면)·빈도(하면) 기준의 A/B Crop 비교 이미지를 만든다."""
+    if pillar.page_a_contour is not None:
+        # A 밴드 컨투어(상·하단 기준선 + 좌·우 컨투어 외곽) 그대로 두 페이지를 자른다.
+        return create_preview_comparison(
+            crop_polygon_tile(pillar.source_preview_image, pillar.page_a_contour),
+            "A Page crop",
+            crop_polygon_tile(image_b, pillar.page_a_contour),
+            "B Page crop",
+        )
     a_preview = create_polygon_preview(
         pillar.source_preview_image,
         result.contours,
@@ -419,21 +459,31 @@ def run_side_detection(image_path, ball_slot_count=3):
     result = _create_base_result(image_a, image_b, gray)
     
     # 하면 기준 컷선 산출(최상단/빈도 계산 기반)
+    if USE_TOP_CROPPED_PAGE_B:
+        # A 상단 기준선 아래 B 크롭 컨투어로 교체한다(실패하면 B 전체 컨투어 유지).
+        _retry_surface_from_page_a(image_a, result, gray.shape)
     cuts = _analyze_surface_cuts(result, gray.shape[1])
-    if USE_CROPPED_PAGE_A_FALLBACK and cuts.bottom_boundary is None:
+    if (
+        USE_CROPPED_PAGE_A_FALLBACK and not result.used_cropped_page_a
+        and cuts.bottom_boundary is None
+    ):
         if _retry_surface_from_page_a(image_a, result, gray.shape):
             cuts = _analyze_surface_cuts(result, gray.shape[1])
     result_image = _create_result_image(gray, result, cuts)
 
     # 표면 기준 볼 ROI 생성 및 시각화
     ball_seconds = _create_ball_rois(gray.shape, result, ball_slot_count)
+
+    # 상면 기준 기둥 탐색 및 시각화(기둥 계산 기반)
+    pillar = _analyze_pillar_surface(image_a, gray.shape, result, cuts=cuts)
+    _fit_slot_ranges_to_page_a(result, pillar)
     draw_surface_slot_guides(
         result_image, result.ball_slot_ranges,
         (cuts.bottom_boundary or {}).get("extended_line"),
     )
-
-    # 상면 기준 기둥 탐색 및 시각화(기둥 계산 기반)
-    pillar = _analyze_pillar_surface(image_a, gray.shape, result, cuts=cuts)
+    draw_surface_slot_guides(
+        result.source_visualization, result.ball_slot_ranges, pillar.bottom_cut_line
+    )
 
     brightness_lines = find_surface_slot_brightness_lines(
         image_a, result.ball_slot_ranges, pillar.bottom_cut_line

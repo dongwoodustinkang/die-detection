@@ -41,6 +41,8 @@ HISTOGRAM_MERGE_POINT_COLOR = (0, 146, 255)
 HISTOGRAM_REMAINDER_POINT_COLOR = (246, 130, 49)
 CENTER_SPLIT_LINE_COLOR = (180, 180, 180)
 CUT_LINE_EXTENSION_COLOR = (112, 112, 112)
+PAGE_A_BAND_MIN_CONTOUR_AREA = 500
+PAGE_A_BOTTOM_EDGE_ROWS = 5
 
 
 # Preview 조립과 마스크 도형
@@ -597,6 +599,47 @@ def apply_side_cutting_mask(mask, left, top, top_cut_line, bottom_cut_line):
         mask[y_coordinates > bottom_cut_y[None, :]] = 0
 
 
+def find_page_a_band_contours(image, top_cut_line, bottom_cut_line):
+    """A 페이지의 상단~하단 기준선 사이에서만 어두운 표면 컨투어를 다시 딴다."""
+    if top_cut_line is None or bottom_cut_line is None:
+        return []
+
+    gray = to_grayscale(image)
+    mask = np.full(gray.shape, 255, dtype=np.uint8)
+    apply_side_cutting_mask(mask, 0, 0, top_cut_line, bottom_cut_line)
+    band = mask != 0
+    if not band.any():
+        return []
+
+    # 기준선 밖 픽셀은 Otsu 통계에서 제외하고, 밝은 배경보다 어두운 표면을 남긴다.
+    otsu_threshold, _ = cv2.threshold(
+        gray[band].reshape(-1, 1), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+    # 표면의 밝은 결무늬가 배경으로 빠져 컨투어가 패이지 않도록
+    # Otsu 값과 배경 밝기의 중간까지 임계값을 올린다.
+    threshold = (otsu_threshold + int(gray[band].max())) / 2
+    binary = np.where(band & (gray <= threshold), 255, 0).astype(np.uint8)
+    contours, _ = cv2.findContours(
+        binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    return [
+        contour for contour in contours
+        if cv2.contourArea(contour) >= PAGE_A_BAND_MIN_CONTOUR_AREA
+    ]
+
+
+def get_page_a_bottom_x_range(contour, image_shape):
+    """A 밴드 컨투어 하단 몇 행에서 좌·우 끝 x를 반환한다."""
+    mask = np.zeros(image_shape[:2], dtype=np.uint8)
+    cv2.drawContours(mask, [contour], -1, 255, thickness=cv2.FILLED)
+    rows = np.flatnonzero(np.any(mask, axis=1))
+    if not rows.size:
+        return None
+    # 하단 기준선이 기울어도 양 끝이 포함되도록 마지막 몇 행을 함께 본다.
+    columns = np.flatnonzero(np.any(mask[rows[-PAGE_A_BOTTOM_EDGE_ROWS:]], axis=0))
+    return int(columns[0]), int(columns[-1])
+
+
 def create_polygon_preview(
     image,
     contours,
@@ -617,26 +660,33 @@ def create_polygon_preview(
         polygon = expand_polygon_to_side_reference_lines(
             polygon, left_reference_line, right_reference_line
         )
-
-        bounds = get_polygon_crop_bounds(polygon, image.shape[:2])
-        if bounds is None:
-            continue
-
-        left, top, right, bottom = bounds
-        tile = to_bgra(image)[top:bottom, left:right].copy()
-        mask = np.zeros(tile.shape[:2], dtype=np.uint8)
-        local_polygon = polygon.copy()
-        local_polygon[:, 0, 0] -= left
-        local_polygon[:, 0, 1] -= top
-        cv2.fillPoly(mask, [local_polygon], 255, lineType=cv2.LINE_AA)
-        apply_side_cutting_mask(
-            mask, left, top, top_cut_line, bottom_cut_line
-        )
-        if not np.any(mask):
-            continue
-        tile[:, :, 3] = cv2.bitwise_and(tile[:, :, 3], mask)
-        tiles.append(tile)
+        tile = crop_polygon_tile(image, polygon, top_cut_line, bottom_cut_line)
+        if tile is not None:
+            tiles.append(tile)
     return stack_preview_tiles(tiles)
+
+
+def crop_polygon_tile(
+    image, polygon, top_cut_line=None, bottom_cut_line=None
+):
+    """다각형 내부의 원본 픽셀만 남긴 투명 Crop 타일을 만든다."""
+
+    bounds = get_polygon_crop_bounds(polygon, image.shape[:2])
+    if bounds is None:
+        return None
+
+    left, top, right, bottom = bounds
+    tile = to_bgra(image)[top:bottom, left:right].copy()
+    mask = np.zeros(tile.shape[:2], dtype=np.uint8)
+    local_polygon = polygon.copy()
+    local_polygon[:, 0, 0] -= left
+    local_polygon[:, 0, 1] -= top
+    cv2.fillPoly(mask, [local_polygon], 255, lineType=cv2.LINE_AA)
+    apply_side_cutting_mask(mask, left, top, top_cut_line, bottom_cut_line)
+    if not np.any(mask):
+        return None
+    tile[:, :, 3] = cv2.bitwise_and(tile[:, :, 3], mask)
+    return tile
 
 
 def add_preview_caption(preview, caption):

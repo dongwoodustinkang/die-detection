@@ -9,6 +9,8 @@ import numpy as np
 
 from contour import (
     ContourMeasurement,
+    MIN_CONTOUR_AREA,
+    MAX_CONTOUR_AREA,
     find_b_contours,
     find_first_contact_points,
     get_contour_box_center_x,
@@ -33,6 +35,7 @@ from .ball import (
 from .surface import (
     CONTOUR_COLOR,
     SOURCE_PREVIEW_MASK_MODE,
+    apply_side_cutting_mask,
     create_polygon_preview,
     create_preview_comparison,
     draw_frequency_contact_points,
@@ -51,7 +54,12 @@ from .surface import (
     get_pillar_bottom_cut_line,
     get_pillar_outer_reference_points,
     get_side_cut_line,
+    extend_line_to_image_edges,
 )
+
+
+# 임시 실험: False로 바꾸면 Page A 크롭 재검출을 사용하지 않는다.
+USE_CROPPED_PAGE_A_FALLBACK = True
 
 
 @dataclass
@@ -61,6 +69,8 @@ class SideDetectionResult:
     raw_image_a: Optional[np.ndarray] = None
     raw_image_b: Optional[np.ndarray] = None
     contours: List[np.ndarray] = field(default_factory=list)
+    used_cropped_page_a: bool = False
+    fallback_pillar_x_range: Optional[Tuple[int, int]] = None
     measurements: List[ContourMeasurement] = field(default_factory=list)
     analysis_preview: Optional[np.ndarray] = None
     source_preview: Optional[np.ndarray] = None
@@ -110,6 +120,66 @@ def _create_base_result(image_a, image_b, gray):
     return result
 
 
+def _retry_surface_from_page_a(image_a, result, image_shape):
+    """A 상단 기준선으로 B를 크롭해 재검출하고 성공한 경우에만 교체한다."""
+    reference_points = find_top_pillar_reference_points(image_a)
+    outer_points = get_pillar_outer_reference_points(image_a, reference_points)
+    downward_points = find_downward_color_change_points(image_a, outer_points)
+    if len(downward_points) == 2:
+        top_cut_line = downward_points
+    elif len(downward_points) == 1:
+        point_y = downward_points[0][1]
+        top_cut_line = ((0, point_y), (image_shape[1] - 1, point_y))
+    else:
+        return False
+
+    surface_image = to_grayscale(result.raw_image_b)
+    mask = np.full(image_shape, 255, dtype=np.uint8)
+    crop_cut_line = tuple((x, y + 3) for x, y in top_cut_line)
+    apply_side_cutting_mask(mask, 0, 0, crop_cut_line, None)
+    valid_rows = np.flatnonzero(np.any(mask, axis=1))
+    if not valid_rows.size:
+        return False
+    crop_top = int(valid_rows[0])
+    crop = surface_image[crop_top:]
+    crop_mask = mask[crop_top:] != 0
+    # 잘라낸 영역의 검은 픽셀을 Otsu 이진화 통계에 포함하지 않는다.
+    threshold, _ = cv2.threshold(
+        crop[crop_mask].reshape(-1, 1), 0, 255,
+        cv2.THRESH_BINARY + cv2.THRESH_OTSU,
+    )
+    contours = []
+    # 크롭 경계의 밝은 배경과 붙으면 임계값을 조금씩 높여 표면을 분리한다.
+    for candidate_threshold in range(int(threshold), 256, 5):
+        binary = np.where(
+            crop_mask & (crop > candidate_threshold), 255, 0
+        ).astype(np.uint8)
+        candidates, _ = cv2.findContours(
+            binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
+            offset=(0, crop_top),
+        )
+        contours = [
+            contour for contour in candidates
+            if MIN_CONTOUR_AREA <= cv2.contourArea(contour) <= MAX_CONTOUR_AREA
+            and cv2.boundingRect(contour)[0] > 0
+            and sum(cv2.boundingRect(contour)[::2]) < image_shape[1]
+        ]
+        if contours:
+            break
+    if not contours:
+        return False
+    result.contours = contours
+    result.measurements = [
+        find_first_contact_points(contour, image_shape) for contour in contours
+    ]
+    result.center_split_x = get_contour_box_center_x(contours, image_shape[1])
+    result.density_log_lines.clear()
+    result.used_cropped_page_a = True
+    if len(downward_points) == 2:
+        result.fallback_pillar_x_range = tuple(sorted(point[0] for point in downward_points))
+    return True
+
+
 def _find_cut_boundary(
     measurements,
     point_attribute,
@@ -148,9 +218,9 @@ def _record_density_log(result, boundary):
 
 
 def _analyze_surface_cuts(result, image_width):
-    """항상 활성화되는 상·하면 측면 커팅 기준선을 계산한다."""
+    """컨투어 컷선을 계산한다. 크롭 재검출 컨투어는 하면만 사용한다."""
     started_at = perf_counter()
-    top_boundary = _find_cut_boundary(
+    top_boundary = None if result.used_cropped_page_a else _find_cut_boundary(
         result.measurements,
         "top_points",
         image_width,
@@ -171,6 +241,17 @@ def _analyze_surface_cuts(result, image_width):
         midpoint_x=result.center_split_x,
     )
     bottom_elapsed = perf_counter() - started_at
+    if result.used_cropped_page_a and result.fallback_pillar_x_range and bottom_boundary:
+        # 컨투어로 구한 하단 높이/기울기를 유지하고 기둥 x에서 양 끝을 잡는다.
+        (x1, y1), (x2, y2) = bottom_boundary["extended_line"]
+        slope = (y2 - y1) / (x2 - x1) if x2 != x1 else 0
+        line = tuple(
+            (x, int(round(y1 + (x - x1) * slope)))
+            for x in result.fallback_pillar_x_range
+        )
+        bottom_boundary = dict(bottom_boundary, line=line,
+            extended_line=extend_line_to_image_edges(line, image_width),
+            markers=tuple((point, False) for point in line))
     _record_density_log(result, bottom_boundary)
     return _SurfaceCutAnalysis(
         top_boundary=top_boundary,
@@ -182,14 +263,14 @@ def _analyze_surface_cuts(result, image_width):
 def _create_result_image(gray, result, cuts):
     """B 페이지 위에 접점·기준선·측면 컷선을 그린다."""
     result_image = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-    draw_frequency_contact_points(
-        result_image, result.measurements, "top_points", use_maximum=True
-    )
+    if not result.used_cropped_page_a:
+        draw_frequency_contact_points(
+            result_image, result.measurements, "top_points", use_maximum=True
+        )
     draw_frequency_contact_points(
         result_image, result.measurements, "bottom_points", use_maximum=False
     )
     draw_side_cutting_guides(result_image, result.center_split_x)
-    draw_side_cutting_boundary(result_image, cuts.top_boundary)
     draw_side_cutting_boundary(result_image, cuts.bottom_boundary)
     return result_image
 
@@ -200,6 +281,12 @@ def _create_ball_rois(image_shape, result, ball_slot_count):
     result.surface_bottom_y_by_x = get_bottom_contour_y_by_x(
         image_shape, result.contours
     )
+    if result.used_cropped_page_a and result.fallback_pillar_x_range:
+        left_x, right_x = result.fallback_pillar_x_range
+        result.surface_bottom_y_by_x = {
+            x: y for x, y in result.surface_bottom_y_by_x.items()
+            if left_x <= x <= right_x
+        }
     result.ball_slot_count = ball_slot_count
     result.ball_slot_ranges = get_surface_slot_ranges(
         result.surface_bottom_y_by_x,
@@ -233,6 +320,10 @@ def _analyze_pillar_surface(image_a, image_shape, result, cuts=None):
         left_reference_line, right_reference_line = get_first_contact_side_lines(
             result.measurements, image_shape[0]
         )
+    if result.used_cropped_page_a and result.fallback_pillar_x_range:
+        left_x, right_x = result.fallback_pillar_x_range
+        left_reference_line = ((left_x, 0), (left_x, image_shape[0] - 1))
+        right_reference_line = ((right_x, 0), (right_x, image_shape[0] - 1))
     pillar_downward_bright_points = find_contour_contact_color_change_points(
         image_a, pillar_downward_points, contour_outline
     )
@@ -260,10 +351,11 @@ def _analyze_pillar_surface(image_a, image_shape, result, cuts=None):
     )
 
     source_visualization = to_bgr(image_a)
-    cv2.drawContours(source_visualization, result.contours, -1, CONTOUR_COLOR, 1)
-    source_visualization = draw_left_right_contour_reference_lines(
-        source_visualization, left_contour_points, right_contour_points
-    )
+    if not result.used_cropped_page_a:
+        cv2.drawContours(source_visualization, result.contours, -1, CONTOUR_COLOR, 1)
+        source_visualization = draw_left_right_contour_reference_lines(
+            source_visualization, left_contour_points, right_contour_points
+        )
     source_visualization = draw_top_pillar_reference_points(
         source_visualization,
         pillar_reference_points,
@@ -328,6 +420,9 @@ def run_side_detection(image_path, ball_slot_count=3):
     
     # 하면 기준 컷선 산출(최상단/빈도 계산 기반)
     cuts = _analyze_surface_cuts(result, gray.shape[1])
+    if USE_CROPPED_PAGE_A_FALLBACK and cuts.bottom_boundary is None:
+        if _retry_surface_from_page_a(image_a, result, gray.shape):
+            cuts = _analyze_surface_cuts(result, gray.shape[1])
     result_image = _create_result_image(gray, result, cuts)
 
     # 표면 기준 볼 ROI 생성 및 시각화

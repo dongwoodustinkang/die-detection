@@ -612,9 +612,12 @@ def find_page_a_band_contours(image, top_cut_line, bottom_cut_line):
         return []
 
     # 기준선 밖 픽셀은 Otsu 통계에서 제외하고, 밝은 배경보다 어두운 표면을 남긴다.
-    threshold, _ = cv2.threshold(
+    otsu_threshold, _ = cv2.threshold(
         gray[band].reshape(-1, 1), 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
     )
+    # 표면의 밝은 결무늬가 배경으로 빠져 컨투어가 패이지 않도록
+    # Otsu 값과 배경 밝기의 중간까지 임계값을 올린다.
+    threshold = (otsu_threshold + int(gray[band].max())) / 2
     binary = np.where(band & (gray <= threshold), 255, 0).astype(np.uint8)
     contours, _ = cv2.findContours(
         binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE

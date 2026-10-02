@@ -3,7 +3,7 @@ from datetime import datetime
 from pathlib import Path
 from time import perf_counter
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor, QImage, QPixmap
 from PyQt5.QtWidgets import (
     QButtonGroup,
@@ -31,6 +31,7 @@ from bottom.circles import (
 )
 from contour import get_primary_contact_reference_point
 from general import NotesRepository, next_capture_path, to_bgr
+from side.ball import get_slot_position_name, get_surface_slot_boundaries
 from side.pipeline import run_side_detection
 from styles import APP_STYLESHEET
 from ui_components import (
@@ -38,7 +39,6 @@ from ui_components import (
     ImageModal,
     InspectionInfoModal,
     NoteModal,
-    TopContourHistogram,
     show_pixel_tooltip, 
 )
 
@@ -81,11 +81,6 @@ class MainWindow(QMainWindow):
         self._last_side_result = None
         # 파일명과 무관하게 사용자가 선택한 슬롯 수로 Side 볼을 검사한다.
         self.current_ball_slot_count = 3
-        self.current_histogram_side = "top"
-        self.current_histogram_region = "all"
-        self.histogram_image_width = 0
-        self.histogram_center_split_x = 0
-        self.histogram_measurements = []
         self.program_log_lines = []
         self.inspection_info_text = "이미지를 불러오면 상세 정보가 표시됩니다."
         self.notes_repository = NotesRepository(NOTES_CSV_PATH)
@@ -170,9 +165,6 @@ class MainWindow(QMainWindow):
         self.source_preview_pixmap = QPixmap()
         self.ball_crop_preview_pixmap = QPixmap()
         self.capture_session_dir = None
-        self.histogram_image_width = 0
-        self.histogram_center_split_x = 0
-        self.histogram_measurements = []
         self.program_log_lines = []
 
         self.image_label.setPixmap(QPixmap())
@@ -187,13 +179,9 @@ class MainWindow(QMainWindow):
         self.source_preview_label.timing_label.setText("최상단/빈도 + 볼 검출 · — ms")
         self.ball_crop_preview_label.setPixmap(QPixmap())
         self.ball_crop_preview_label.setText("조건을 만족하는 볼이 탐지되면 정사각형 내부가 표시됩니다.")
-        self.top_contour_histogram.set_coordinates(())
-        self.histogram_title.setText("상면 외곽 컨투어 첫 접점 y 좌표 분포 · 전체")
-        self.top_contour_count_label.setText("전체 0개")
         self.inspection_info_text = "이미지를 불러오면 상세 정보가 표시됩니다."
         self.file_context_label.setText("Filename · 선택된 TIFF 이미지 없음")
         self.header_metadata_label.setText(f"{algorithm_label} 알고리즘 · TIFF 이미지를 불러오세요.")
-        self._set_detection_state("idle")
         self.prev_btn.setEnabled(False)
         self.note_btn.setEnabled(False)
         self.next_btn.setEnabled(False)
@@ -210,8 +198,6 @@ class MainWindow(QMainWindow):
         self.source_preview_label.section_widget.setVisible(is_bottom)
         self.ball_crop_preview_label.section_widget.setVisible(not is_bottom)
         self.ball_slot_selector.setVisible(self.active_algorithm == "side")
-        self.histogram_controls.setVisible(not is_bottom)
-        self.top_contour_histogram.setVisible(not is_bottom)
         preview = self.analysis_preview_label
         preview.title_label.setText("칩 영역 · ROI 검사" if is_bottom else preview.default_title)
         preview.modal_title = "칩 영역 · ROI 검사" if is_bottom else preview.default_modal_title
@@ -290,33 +276,7 @@ class MainWindow(QMainWindow):
         action_layout.addWidget(self.detect_btn)
         header.addWidget(action_group)
 
-        self.detection_result_badge = QFrame()
-        self.detection_result_badge.setObjectName("detectionResultBadge")
-        badge_layout = QHBoxLayout(self.detection_result_badge)
-        badge_layout.setContentsMargins(12, 7, 12, 7)
-        self.detection_result_label = QLabel()
-        self.detection_result_label.setObjectName("detectionResultLabel")
-        badge_layout.addWidget(self.detection_result_label)
-        header.addWidget(self.detection_result_badge)
-        self._set_detection_state("idle")
-
         return header
-
-    def _set_detection_state(self, state):
-        state_text = {
-            "idle": "대기",
-            "detected": "검출",
-            "not_detected": "미검출",
-            "error": "오류",
-        }[state]
-        if self.active_algorithm == "bottom":
-            state_text = {"detected": "원 후보 검출", "not_detected": "검토 필요"}.get(
-                state, state_text
-            )
-        self.detection_result_badge.setProperty("state", state)
-        self.detection_result_label.setText(state_text)
-        self.detection_result_badge.style().unpolish(self.detection_result_badge)
-        self.detection_result_badge.style().polish(self.detection_result_badge)
 
     def _create_floating_navigation(self):
         """Keep image navigation close at hand without permanently occupying workspace."""
@@ -508,69 +468,6 @@ class MainWindow(QMainWindow):
         self.ball_slot_buttons[self.current_ball_slot_count].setChecked(True)
         self.ball_slot_group.buttonClicked.connect(self._on_ball_slot_count_changed)
         self.analysis_preview_label.header_layout.addWidget(self.ball_slot_selector)
-        self.histogram_controls = QWidget()
-        histogram_header = QHBoxLayout(self.histogram_controls)
-        histogram_header.setContentsMargins(0, 0, 0, 0)
-        self.histogram_title = QLabel("상면 외곽 컨투어 첫 접점 y 좌표 분포")
-        self.histogram_title.setObjectName("previewTitle")
-        self.top_contour_count_label = QLabel("전체 0개")
-        self.top_contour_count_label.setObjectName("histogramCount")
-        histogram_header.addWidget(self.histogram_title)
-        histogram_header.addStretch()
-        self.histogram_side_group = QButtonGroup(self)
-        self.histogram_side_group.setExclusive(True)
-        self.histogram_side_buttons = {}
-        for side_key, label_text in (
-            ("top", "상"),
-            ("bottom", "하"),
-            ("left", "좌"),
-            ("right", "우"),
-        ):
-            button = QPushButton(label_text)
-            button.setObjectName("histogramSideButton")
-            button.setCheckable(True)
-            self.histogram_side_group.addButton(button)
-            self.histogram_side_buttons[side_key] = button
-            histogram_header.addWidget(button)
-        self.histogram_side_buttons[self.current_histogram_side].setChecked(True)
-        self.histogram_side_group.buttonClicked.connect(
-            self._on_histogram_side_changed
-        )
-
-        region_selector = QFrame()
-        region_selector.setObjectName("histogramRegionSelector")
-        region_layout = QVBoxLayout(region_selector)
-        region_layout.setContentsMargins(4, 3, 4, 3)
-        region_layout.setSpacing(2)
-        region_title = QLabel("영역")
-        region_title.setObjectName("histogramRegionTitle")
-        region_title.setAlignment(Qt.AlignCenter)
-        region_layout.addWidget(region_title)
-        self.histogram_region_group = QButtonGroup(self)
-        self.histogram_region_group.setExclusive(True)
-        self.histogram_region_buttons = {}
-        for region_key, label_text, tooltip in (
-            ("all", "전체", "선택한 면의 전체 분포"),
-            ("left", "좌측", "선택한 상·하면의 좌측 분포"),
-            ("right", "우측", "선택한 상·하면의 우측 분포"),
-        ):
-            button = QPushButton(label_text)
-            button.setObjectName("histogramRegionButton")
-            button.setCheckable(True)
-            button.setToolTip(tooltip)
-            self.histogram_region_group.addButton(button)
-            self.histogram_region_buttons[region_key] = button
-            region_layout.addWidget(button)
-        self.histogram_region_buttons[self.current_histogram_region].setChecked(True)
-        self.histogram_region_group.buttonClicked.connect(
-            self._on_histogram_region_changed
-        )
-        self._update_histogram_region_controls()
-        histogram_header.addWidget(region_selector)
-        histogram_header.addWidget(self.top_contour_count_label)
-        layout.addWidget(self.histogram_controls)
-        self.top_contour_histogram = TopContourHistogram()
-        layout.addWidget(self.top_contour_histogram)
         self.analysis_preview_label.clicked.connect(
             lambda: self._show_image_modal(
                 self.analysis_preview_pixmap,
@@ -838,8 +735,6 @@ class MainWindow(QMainWindow):
 
         elapsed_seconds = perf_counter() - started_at
         images_per_second = 1 / max(elapsed_seconds, 0.000001)
-        self.histogram_image_width = result_image.shape[1]
-        self.histogram_center_split_x = result.center_split_x or self.histogram_image_width // 2
         self.raw_original_pixmap = self._pixmap_from_image(to_bgr(result.raw_image_a))
         self.raw_result_pixmap = self._pixmap_from_image(to_bgr(result.raw_image_b))
         self.annotated_original_pixmap = self._pixmap_from_image(
@@ -852,10 +747,9 @@ class MainWindow(QMainWindow):
         self._last_side_result = result
         self._refresh_ball_preview()
         self._show_preview_timings(result)
-        detection_state = "detected" if result.is_detected else "not_detected"
-        self._set_detection_state(detection_state)
         self._update_info_label(path, result, elapsed_seconds, images_per_second)
-        self._show_top_contour_histogram(result.measurements)
+        # 결과 표시 후 레이아웃이 다시 잡히므로 확정된 칸 크기로 한 번 더 맞춘다.
+        QTimer.singleShot(0, self._refresh_scaled_pixmaps)
 
     def _show_bottom_result(self, path, result, elapsed_seconds):
         """A의 ROI와 실제 윤곽, 위치별 조건 검사 결과를 표시한다."""
@@ -869,7 +763,6 @@ class MainWindow(QMainWindow):
         self.analysis_preview_label.timing_label.setText(
             f"원 후보 검사 · {elapsed_seconds * 1000:.1f} ms"
         )
-        self._set_detection_state("detected" if result.all_regions_accepted else "not_detected")
         self.header_metadata_label.setText(
             f"Bottom 원 후보 검사 완료 · {elapsed_seconds * 1000:.1f} ms"
         )
@@ -887,7 +780,6 @@ class MainWindow(QMainWindow):
         chip = result.chip
         if chip is None:
             summary = "완전한 사각 칩 외곽을 찾지 못했습니다."
-            self.detection_result_label.setText("칩 미검출")
             self.analysis_preview_label.setText(summary)
             self.source_preview_label.setText("칩 위치가 없어 원 후보를 검사하지 않았습니다.")
         else:
@@ -958,7 +850,6 @@ class MainWindow(QMainWindow):
         self.program_log_lines = [message]
         self.inspection_info_text = message
         self.header_metadata_label.setText("Bottom 원 후보 검사 실패")
-        self._set_detection_state("error")
 
     def _show_result_image(self, bgr_image):
         self.result_pixmap = self._pixmap_from_image(bgr_image)
@@ -1044,108 +935,6 @@ class MainWindow(QMainWindow):
                 f"최상단/빈도 + 볼 검출 · {result.frequency_with_ball_ms:.1f} ms"
             )
 
-    def _on_histogram_side_changed(self, button):
-        self.current_histogram_side = next(
-            side_key
-            for side_key, side_button in self.histogram_side_buttons.items()
-            if side_button is button
-        )
-        self._update_histogram_region_controls()
-        self._show_top_contour_histogram(self.histogram_measurements)
-
-    def _on_histogram_region_changed(self, button):
-        self.current_histogram_region = next(
-            region_key
-            for region_key, region_button in self.histogram_region_buttons.items()
-            if region_button is button
-        )
-        self._show_top_contour_histogram(self.histogram_measurements)
-
-    def _update_histogram_region_controls(self):
-        """좌·우 분포 필터는 상·하면 y 좌표 분포에서만 사용한다."""
-        enabled = self.current_histogram_side in {"top", "bottom"}
-        for button in self.histogram_region_buttons.values():
-            button.setEnabled(enabled)
-
-    def _show_top_contour_histogram(self, measurements):
-        """선택한 면에 처음 닿는 모든 좌표의 분포를 표시한다."""
-
-        self.histogram_measurements = measurements
-        point_attribute, coordinate_index, title = {
-            "top": ("top_points", 1, "상면 외곽 컨투어 첫 접점 y 좌표 분포"),
-            "bottom": ("bottom_points", 1, "하면 외곽 컨투어 첫 접점 y 좌표 분포"),
-            "left": ("left_points", 0, "좌면 외곽 컨투어 첫 접점 x 좌표 분포"),
-            "right": ("right_points", 0, "우면 외곽 컨투어 첫 접점 x 좌표 분포"),
-        }[self.current_histogram_side]
-        coordinates = [
-            point[coordinate_index]
-            for measurement in measurements
-            for point in getattr(measurement, point_attribute)
-            if (
-                self.current_histogram_side not in {"top", "bottom"}
-                or self.current_histogram_region == "all"
-                or (
-                    point[0] < self.histogram_center_split_x
-                    if self.current_histogram_region == "left"
-                    else point[0] >= self.histogram_center_split_x
-                )
-            )
-        ]
-        coordinate_axis = "y" if coordinate_index == 1 else "x"
-        coordinate_range = self._get_histogram_coordinate_range(
-            measurements, coordinate_index
-        )
-        region_name = {
-            "all": "전체",
-            "left": "좌측",
-            "right": "우측",
-        }[self.current_histogram_region]
-        if self.current_histogram_side not in {"top", "bottom"}:
-            region_name = "전체"
-        self.top_contour_histogram.set_coordinates(
-            coordinates,
-            coordinate_axis,
-            coordinate_range,
-            self.current_histogram_side,
-        )
-        self.inspection_info_text = "\n".join(
-            self.program_log_lines + self.top_contour_histogram.log_lines
-        )
-        self.histogram_title.setText(f"{title} · {region_name}")
-        self.top_contour_count_label.setText(f"{region_name} {len(coordinates):,}개")
-
-    @staticmethod
-    def _get_histogram_coordinate_range(measurements, coordinate_index):
-        """기준선 사각형 안에서 사용할 전체 x/y 좌표 범위를 구한다."""
-
-        ranges = []
-        for measurement in measurements:
-            if coordinate_index == 1:
-                first_point = get_primary_contact_reference_point(
-                    measurement.top_points, 1, use_minimum=True
-                )
-                last_point = get_primary_contact_reference_point(
-                    measurement.bottom_points, 1, use_minimum=False
-                )
-            else:
-                first_point = get_primary_contact_reference_point(
-                    measurement.left_points, 0, use_minimum=True
-                )
-                last_point = get_primary_contact_reference_point(
-                    measurement.right_points, 0, use_minimum=False
-                )
-
-            if first_point is not None and last_point is not None:
-                ranges.append(
-                    (first_point[coordinate_index], last_point[coordinate_index])
-                )
-
-        if not ranges:
-            return None
-        minimum = min(first_coordinate for first_coordinate, _ in ranges)
-        maximum = max(last_coordinate for _, last_coordinate in ranges)
-        return (minimum, maximum) if minimum <= maximum else None
-
     @staticmethod
     def _pixmap_from_image(image):
         image = image.copy()
@@ -1191,13 +980,7 @@ class MainWindow(QMainWindow):
         self.ball_crop_preview_label.setText(
             "조건을 만족하는 볼이 탐지되면 정사각형 내부가 표시됩니다."
         )
-        self.top_contour_histogram.set_coordinates(())
-        self.histogram_image_width = 0
-        self.histogram_center_split_x = 0
-        self.histogram_measurements = []
-        self.top_contour_count_label.setText("전체 0개")
         self.header_metadata_label.setText(f"검사 실패 · {message}")
-        self._set_detection_state("error")
 
     def _update_info_label(
         self, path, result=None, elapsed_seconds=None, images_per_second=None
@@ -1214,6 +997,12 @@ class MainWindow(QMainWindow):
 
             lines.extend(("", "[볼]"))
             lines.append(f"표면 기준 볼 ROI : {len(result.ball_roi_polygons)}개")
+            slot_count = len(get_surface_slot_boundaries(result.ball_slot_ranges)) - 1
+            for slot_index, ball_width, ball_height, _, status in result.ball_slot_measurements:
+                label = get_slot_position_name(slot_index, slot_count)
+                if ball_width is not None:
+                    label = f"{label} ({ball_width} X {ball_height})"
+                lines.append(f"{label} : {status}")
         self.program_log_lines = lines
         self.inspection_info_text = "\n".join(self.program_log_lines)
 

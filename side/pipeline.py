@@ -20,14 +20,12 @@ from .ball import (
     draw_surface_slot_guides,
     find_surface_slot_brightness_lines,
     draw_surface_slot_brightness_lines,
-    find_surface_slot_deepest_bright_points,
-    draw_surface_slot_bright_points,
-    draw_representative_point_rois,
-    create_representative_point_rois,
-    fit_representative_rois_to_contours,
-    create_measured_ball_roi_preview,
-    find_surface_slot_ball_contours,
-    draw_surface_slot_ball_contours,
+    offset_surface_slot_lines,
+    draw_surface_slot_offset_lines,
+    find_surface_slot_ball_rois,
+    draw_surface_slot_ball_boxes,
+    pad_ball_roi,
+    create_slot_ball_preview,
     get_bottom_contour_y_by_x,
     get_surface_slot_ranges,
     get_surface_slot_boundaries,
@@ -90,15 +88,15 @@ class SideDetectionResult:
     ball_slot_ranges: List[Tuple[int, int]] = field(default_factory=list)
     ball_roi_polygons: List[np.ndarray] = field(default_factory=list)
     ball_roi_preview: Optional[np.ndarray] = None
-    ball_contours: List[np.ndarray] = field(default_factory=list)
-    ball_roi_measurements: List[Tuple[Optional[int], Optional[int], Optional[int]]] = field(default_factory=list)
+    # (슬롯 번호, 너비 px, 높이 px, (left, top, right, bottom), 판정)
+    ball_slot_measurements: List[Tuple[Optional[int], Optional[int], Optional[int], Optional[Tuple[int, int, int, int]], str]] = field(default_factory=list)
     pillar_with_ball_ms: float = 0.0
     frequency_with_ball_ms: float = 0.0
 
     @property
     def is_detected(self):
-        """컨투어와 볼 검사 ROI가 준비됐을 때 검출 준비 상태로 판단한다."""
-        return bool(self.contours and self.ball_roi_polygons)
+        """표면 컨투어가 준비됐을 때 검출 준비 상태로 판단한다."""
+        return bool(self.contours)
 
 
 @dataclass
@@ -497,26 +495,29 @@ def run_side_detection(image_path, ball_slot_count=3):
             ]
     draw_surface_slot_brightness_lines(result.source_visualization, brightness_lines)
     draw_surface_slot_brightness_lines(result_image, brightness_lines)
-    bright_points = find_surface_slot_deepest_bright_points(image_a, brightness_lines)
-    result.ball_contours = find_surface_slot_ball_contours(
-        image_a, brightness_lines
+    offset_lines = offset_surface_slot_lines(
+        brightness_lines, pillar.top_cut_line, pillar.bottom_cut_line
     )
-    draw_surface_slot_ball_contours(result.source_visualization, result.ball_contours)
-    draw_surface_slot_ball_contours(result_image, result.ball_contours)
-    draw_surface_slot_bright_points(result.source_visualization, bright_points)
-    draw_surface_slot_bright_points(result_image, bright_points)
-    point_rois = create_representative_point_rois(
-        brightness_lines, bright_points, result.ball_slot_ranges
+    draw_surface_slot_offset_lines(result.source_visualization, offset_lines)
+    draw_surface_slot_offset_lines(result_image, offset_lines)
+    # 2개 슬롯 모드는 가운데 슬롯을 빼고 Slot 1, Slot 3만 검사한다.
+    slot_indices = [
+        index for index in range(len(get_surface_slot_boundaries(result.ball_slot_ranges)) - 1)
+        if not (result.ball_slot_count == 2 and index == 1)
+    ]
+    result.ball_slot_measurements = find_surface_slot_ball_rois(
+        image_a, brightness_lines, offset_lines, result.ball_slot_ranges, slot_indices
     )
-    point_rois = fit_representative_rois_to_contours(point_rois, result.ball_contours)
     result.ball_roi_polygons = [
         np.asarray(((left, top), (right, top), (right, bottom), (left, bottom)), dtype=np.int32)
-        for _, (left, top, right, bottom) in point_rois
+        for _, _, _, box, _ in result.ball_slot_measurements if box is not None
+        for left, top, right, bottom in (pad_ball_roi(box, image_a.shape),)
     ]
-    draw_representative_point_rois(result.source_visualization, point_rois)
-    draw_representative_point_rois(result_image, point_rois)
-    result.ball_roi_preview, result.ball_roi_measurements = create_measured_ball_roi_preview(
-        image_a, point_rois, result.ball_contours
+    draw_surface_slot_ball_boxes(result.source_visualization, result.ball_slot_measurements)
+    draw_surface_slot_ball_boxes(result_image, result.ball_slot_measurements)
+    result.ball_roi_preview = create_slot_ball_preview(
+        image_a, result.ball_slot_measurements,
+        len(get_surface_slot_boundaries(result.ball_slot_ranges)) - 1,
     )
 
 

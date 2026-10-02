@@ -1,9 +1,11 @@
 """표면 하면 컨투어를 기준으로 Side 볼 검사 ROI를 만드는 기능."""
 
+from functools import lru_cache
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import cv2
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 
 from general import to_grayscale
 
@@ -19,12 +21,47 @@ SLOT_LINE_GRAY_MIN = 220
 SLOT_LINE_GRAY_MAX = 225
 SLOT_LINE_SEARCH_HEIGHT = 80
 WHITE_VALUE = 255
-# 임시 컨투어 실험: 이 플래그로 기존 선·점 표시만 사용하는 상태로 돌아간다.
-ENABLE_SLOT_CONTOUR_EXPERIMENT = True
-SLOT_CONTOUR_THRESHOLD = 249
-SLOT_CONTOUR_MIN_AREA = 160
-SLOT_CONTOUR_MAX_AREA = 3200
-SLOT_CONTOUR_SHARPEN_AMOUNT = 2.5
+# 노란 기준선에서 표면 높이만큼 아래로 띄운 보조 가로선 색(BGR, 자홍색)이다.
+SLOT_OFFSET_LINE_COLOR = (255, 0, 255)
+# 노란 기준선은 하단 기준선 아래에서 이 값을 넘는 첫 행이다.
+SLOT_LINE_BRIGHT_MIN = 240
+# 노란 기준선 행에서 볼 색으로 보는 최대 그레이 값이다.
+SLOT_BALL_DARK_MAX = 210
+# 노란 기준선 아래에 남은 표면 줄을 건너뛰는 조건이다. 노란선부터 최대 행 수 안에서
+# 어두운 폭이 이 값(px) 이상 줄어들고, 그 아래 2행도 줄어든 폭에서 이 값 이상 더
+# 줄지 않는(안정된) 마지막 지점의 다음 행부터 ROI를 시작한다. 계속 좁아지는 경우는
+# 표면 줄이 아니라 작은 볼의 둥근 아래쪽이므로 건너뛰지 않는다.
+SLOT_BALL_RESIDUE_SHRINK = 3
+SLOT_BALL_RESIDUE_MAX_ROWS = 5
+# 자홍색 기준선에서 위로 올라가며 이 값 이하(0~230)를 처음 만나는 행을 볼 하단으로 본다.
+SLOT_BALL_BOTTOM_MAX = 230
+# 볼 판정 기준이다. ROI 하단 행의 중앙 x ±3px에 검정(0~230)이 없으면 기형,
+# 면적(너비×높이)이 30×30 이상이면 크기 이상(대), 20×10보다 작으면 크기 이상(소)이다.
+SLOT_BALL_CENTER_HALF_WIDTH = 3
+SLOT_BALL_MAX_AREA = 30 * 30
+SLOT_BALL_MIN_AREA = 20 * 10
+# 화면 표시·프리뷰용 ROI는 볼 영역에서 좌·우·아래로 이만큼(px) 여유를 둔다.
+# 너비·높이 측정과 판정은 여유 없는 볼 영역으로 한다.
+SLOT_BALL_ROI_PADDING = 2
+BALL_STATUS_OK = "검출"
+BALL_STATUS_DEFORMED = "기형"
+BALL_STATUS_LARGE = "크기 이상(대)"
+BALL_STATUS_SMALL = "크기 이상(소)"
+BALL_STATUS_MISSING = "미검출"
+# 한글 폰트가 없을 때 프리뷰에 쓰는 영문 표기다.
+BALL_STATUS_ENGLISH = {
+    BALL_STATUS_OK: "OK",
+    BALL_STATUS_DEFORMED: "Deformed",
+    BALL_STATUS_LARGE: "Size large",
+    BALL_STATUS_SMALL: "Size small",
+    BALL_STATUS_MISSING: "Not detected",
+}
+# 프리뷰 라벨용 한글 폰트 후보(macOS, Windows, Linux 순)이다.
+PREVIEW_FONT_CANDIDATES = (
+    "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+    "C:/Windows/Fonts/malgun.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+)
 
 
 def _contour_line_mask(
@@ -373,31 +410,41 @@ def get_surface_slot_boundaries(slot_ranges):
     ]
 
 
+def _find_first_bright_y_on_column(gray, x, bottom_cut_line):
+    """세로선 x에서 기준선 아래 첫 240 초과 픽셀의 y를 찾는다."""
+    (x1, y1), (x2, y2) = bottom_cut_line
+    baseline_y = y1 + (y2 - y1) * (x - x1) / (x2 - x1)
+    start_y = max(0, int(np.floor(baseline_y)) + 1)
+    column = gray[start_y:, x]
+    hits = np.flatnonzero(column > SLOT_LINE_BRIGHT_MIN)
+    return start_y + int(hits[0]) if hits.size else None
+
+
 def find_surface_slot_brightness_lines(image, slot_ranges, bottom_cut_line):
-    """슬롯별 기준선 아래에서 240~255 픽셀이 20% 이상인 첫 행을 찾는다."""
+    """가운데 슬롯 세로선 2개에서만 기준선 아래 첫 240 초과 픽셀 행을 찾는다."""
     if bottom_cut_line is None:
         return []
-    (x1, y1), (x2, y2) = bottom_cut_line
+    (x1, _), (x2, _) = bottom_cut_line
     if x1 == x2:
         return []
     gray = to_grayscale(image)
     height, width = gray.shape
     boundaries = get_surface_slot_boundaries(slot_ranges)
+    # 슬롯 전체 x 대신 양끝을 뺀 가운데 세로선 좌표만 검사해 연산을 줄인다.
+    inner_hits = {
+        x: _find_first_bright_y_on_column(gray, x, bottom_cut_line)
+        for x in boundaries[1:-1]
+        if 0 <= x < width
+    }
     lines = []
     for left, stop in zip(boundaries, boundaries[1:]):
+        # 슬롯에 맞닿은 가운데 세로선 접점의 평균 y를 사용한다.
+        ys = [y for x, y in inner_hits.items() if x in (left, stop) and y is not None]
         left, stop = max(0, left), min(width, stop)
-        if left >= stop:
+        if left >= stop or not ys:
             continue
-        xs = np.arange(left, stop)
-        baseline_ys = y1 + (y2 - y1) * (xs - x1) / (x2 - x1)
-        # 기울어진 기준선의 각 x에서 기준선 아래인 픽셀만 집계한다.
-        start_y = max(0, int(np.floor(baseline_ys.min())) + 1)
-        for y in range(start_y, height):
-            row = gray[y, left:stop]
-            bright = (row >= 240) & (row <= 255) & (y > baseline_ys)
-            if np.count_nonzero(bright) * 5 >= stop - left:
-                lines.append(((left, y), (stop - 1, y)))
-                break
+        y = int(round(sum(ys) / len(ys)))
+        lines.append(((left, y), (stop - 1, y)))
     return lines
 
 
@@ -407,171 +454,228 @@ def draw_surface_slot_brightness_lines(image, lines):
         cv2.line(image, start, end, (0, 200, 255), 1, cv2.LINE_AA)
 
 
-def find_surface_slot_deepest_bright_points(image, lines):
-    """각 x의 첫 230~255 접점 중 가로선에서 가장 먼 점을 반환한다."""
-    gray = to_grayscale(image)
-    height, width = gray.shape
-    points = []
-    for (left, line_y), (right, _) in lines:
-        start_y = max(0, line_y + 1)
-        if start_y >= height:
-            continue
-        center_x = (left + right) / 2
-        best_point = None
-        best_key = None
-        for x in range(max(0, left), min(width - 1, right) + 1):
-            column = gray[start_y:, x]
-            hits = np.flatnonzero((column >= 230) & (column <= 255))
-            if not hits.size:
-                continue
-            y = start_y + int(hits[0])
-            key = (y - line_y, -abs(x - center_x))
-            if best_key is None or key > best_key:
-                best_key = key
-                best_point = (x, y)
-        if best_point is not None:
-            points.append(best_point)
-    return points
+def _line_y_at(line, x):
+    (x1, y1), (x2, y2) = line
+    return y1 + (y2 - y1) * (x - x1) / (x2 - x1)
 
 
-def draw_surface_slot_bright_points(image, points):
-    """슬롯별 최장거리 밝기 접점을 노란색 점으로 표시한다."""
-    for point in points:
-        cv2.circle(image, point, 3, (0, 200, 255), cv2.FILLED, cv2.LINE_AA)
-
-
-def create_representative_point_rois(lines, points, slot_ranges):
-    """거리 10px 이상인 대표점에 너비 40px, 노란선부터의 ROI를 만든다."""
-    boundaries = get_surface_slot_boundaries(slot_ranges)
-    rois = []
-    for (left, top), (right, _) in lines:
-        slot_index = next((i for i, (a, b) in enumerate(zip(boundaries, boundaries[1:]))
-                           if a <= left < b), None)
-        for x, bottom in points:
-            if left <= x <= right and bottom - top >= 10:
-                rois.append((slot_index, (x - 20, top, x + 19, bottom)))
-                break
-    return rois
-
-
-def draw_representative_point_rois(image, rois):
-    """노란선을 상단, 대표점을 하단으로 하는 ROI를 표시한다."""
-    for _, (left, top, right, bottom) in rois:
-        cv2.rectangle(image, (left, top), (right, bottom), ROI_COLOR, 1, cv2.LINE_AA)
-
-
-def fit_representative_rois_to_contours(rois, contours):
-    """대표점에 가장 가까운 겹친 컨투어 전체가 들어가도록 ROI를 확장한다."""
-    fitted = []
-    for slot_index, (left, top, right, bottom) in rois:
-        anchor = (float(left + 20), float(bottom))
-        candidates = []
-        for contour in contours:
-            x, y, w, h = cv2.boundingRect(contour)
-            if x > right or x + w - 1 < left or y > bottom or y + h - 1 < top:
-                continue
-            distance = abs(cv2.pointPolygonTest(contour, anchor, True))
-            candidates.append((distance, -cv2.contourArea(contour), (x, y, w, h)))
-        if candidates:
-            _, _, (x, y, w, h) = min(candidates, key=lambda item: item[:2])
-            left, top = min(left, x), min(top, y)
-            right, bottom = max(right, x + w - 1), max(bottom, y + h - 1)
-        fitted.append((slot_index, (left, top, right, bottom)))
-    return fitted
-
-
-def create_measured_ball_roi_preview(image, rois, contours):
-    """슬롯별 ROI와 내부 컨투어 후보의 너비·높이를 px 단위로 표시한다."""
-    source = _as_color_image(image).copy()
-    image_height, image_width = source.shape[:2]
-    tiles = []
-    measurements = []
-    for slot_index, (left, top, right, bottom) in rois:
-        x0, y0 = max(0, left), max(0, top)
-        x1, y1 = min(image_width, right + 1), min(image_height, bottom + 1)
-        if x0 >= x1 or y0 >= y1:
-            continue
-        # ROI 안에 컨투어 중심이 있는 후보 중 면적이 가장 큰 객체를 측정한다.
-        candidates = []
-        for contour in contours:
-            x, y, w, h = cv2.boundingRect(contour)
-            if x0 <= x + (w - 1) / 2 < x1 and y0 <= y + (h - 1) / 2 < y1:
-                candidates.append(contour)
-        if candidates:
-            contour = max(candidates, key=cv2.contourArea)
-            _, _, ball_width, ball_height = cv2.boundingRect(contour)
-        else:
-            ball_width = ball_height = None
-        measurements.append((slot_index, ball_width, ball_height))
-        crop = source[y0:y1, x0:x1]
-        scale = 3
-        crop = cv2.resize(crop, (crop.shape[1] * scale, crop.shape[0] * scale),
-                          interpolation=cv2.INTER_NEAREST)
-        tile_width = max(160, crop.shape[1] + 8)
-        tile = np.full((crop.shape[0] + 62, tile_width, 3), 255, dtype=np.uint8)
-        offset = (tile_width - crop.shape[1]) // 2
-        tile[4:4 + crop.shape[0], offset:offset + crop.shape[1]] = crop
-        label = f"Slot {slot_index + 1}" if slot_index is not None else "Slot"
-        cv2.putText(tile, label, (6, crop.shape[0] + 23), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.45, (40, 40, 40), 1, cv2.LINE_AA)
-        size_text = (f"W: {ball_width}px  H: {ball_height}px" if ball_width is not None
-                     else "W: --  H: --")
-        cv2.putText(tile, size_text, (6, crop.shape[0] + 45), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.4, (40, 40, 40), 1, cv2.LINE_AA)
-        tiles.append(tile)
-    if not tiles:
-        return None, measurements
-    output = np.full((max(t.shape[0] for t in tiles),
-                      sum(t.shape[1] for t in tiles) + 8 * (len(tiles) - 1), 3),
-                     255, dtype=np.uint8)
-    offset = 0
-    for tile in tiles:
-        output[:tile.shape[0], offset:offset + tile.shape[1]] = tile
-        offset += tile.shape[1] + 8
-    return output, measurements
-
-
-def enhance_ball_contour_edges(gray):
-    """약하게 흐린 영상과의 차이를 더해 이진화 전에 윤곽을 강조한다."""
-    denoised = cv2.medianBlur(gray, 3)
-    blurred = cv2.GaussianBlur(denoised, (3, 3), 1.0)
-    return cv2.addWeighted(
-        denoised, 1.0 + SLOT_CONTOUR_SHARPEN_AMOUNT,
-        blurred, -SLOT_CONTOUR_SHARPEN_AMOUNT, 0,
-    )
-
-
-def find_surface_slot_ball_contours(image, lines):
-    """임시: 윤곽 강조 후 반전 이진화하고 면적으로 후보를 거른다."""
-    if not ENABLE_SLOT_CONTOUR_EXPERIMENT:
+def offset_surface_slot_lines(lines, top_cut_line, bottom_cut_line):
+    """슬롯별 노란 기준선을 상단~하단 기준선 간격(표면 높이)만큼 아래로 옮긴다."""
+    if top_cut_line is None or bottom_cut_line is None:
         return []
+    if top_cut_line[0][0] == top_cut_line[1][0] or bottom_cut_line[0][0] == bottom_cut_line[1][0]:
+        return []
+    offset_lines = []
+    for (x1, y1), (x2, y2) in lines:
+        # 이미지 배율이 바뀌어도 따라가도록 슬롯 가운데 x의 표면 높이를 쓴다.
+        center_x = (x1 + x2) / 2
+        distance = int(round(
+            _line_y_at(bottom_cut_line, center_x) - _line_y_at(top_cut_line, center_x)
+        ))
+        offset_lines.append(((x1, y1 + distance), (x2, y2 + distance)))
+    return offset_lines
+
+
+def draw_surface_slot_offset_lines(image, lines):
+    """이미지 안에 들어오는 보조 가로선만 표시한다."""
+    height = image.shape[0]
+    for start, end in lines:
+        if start[1] < height:
+            cv2.line(image, start, end, SLOT_OFFSET_LINE_COLOR, 1, cv2.LINE_AA)
+
+
+def find_surface_slot_ball_rois(image, lines, offset_lines, slot_ranges, slot_indices):
+    """노란 기준선 접점에서 가로로 좌·우 끝을, 자홍색 기준선에서 위로 하단을 찾아 볼 ROI를 만든다.
+
+    slot_indices 순서대로 (슬롯 번호, 너비, 높이, 박스, 판정)을 반환한다.
+    ROI가 없는 슬롯은 너비·높이·박스를 None, 판정을 미검출로 둔다.
+    """
     gray = to_grayscale(image)
-    enhanced = enhance_ball_contour_edges(gray)
     height, width = gray.shape
-    selected = []
-    for (left, line_y), (right, _) in lines:
-        left, right = max(0, left), min(width - 1, right)
-        top = max(0, line_y + 1)
-        if left > right or top >= height:
-            continue
-        _, mask = cv2.threshold(
-            enhanced[top:, left:right + 1], SLOT_CONTOUR_THRESHOLD, 255,
-            cv2.THRESH_BINARY_INV,
+    boundaries = get_surface_slot_boundaries(slot_ranges)
+    # 슬롯 왼쪽 x로 자홍색 기준선 y를 찾는다(없으면 이미지 맨 아래까지 본다).
+    offset_y_by_left = {start[0]: start[1] for start, _ in offset_lines}
+    found = {}
+    for (left, y), (right, _) in lines:
+        magenta_y = min(height - 1, offset_y_by_left.get(left, height - 1))
+        slot_index = next(
+            (i for i, (a, b) in enumerate(zip(boundaries, boundaries[1:])) if a <= left < b),
+            None,
         )
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if not SLOT_CONTOUR_MIN_AREA <= area <= SLOT_CONTOUR_MAX_AREA:
-                continue
-            contour = contour + np.asarray([[[left, top]]], dtype=np.int32)
-            selected.append(contour)
-    return selected
+        x0, x1 = max(0, left), min(width - 1, right)
+        if slot_index is None or not 0 <= y < height or x0 > x1:
+            continue
+        # 좌·우 접점에서 안쪽으로 처음 만나는 볼 색(0~210)이 ROI의 좌·우 끝이다.
+        rows = gray[y:min(height, y + SLOT_BALL_RESIDUE_MAX_ROWS + 3), x0:x1 + 1] <= SLOT_BALL_DARK_MAX
+        spans = [
+            (int(cols[0]), int(cols[-1])) if cols.size else None
+            for cols in (np.flatnonzero(row) for row in rows)
+        ]
+        # 표면 줄은 여러 행일 수 있어(예: 폭 31→54→54→54→23) 범위 안에서 폭이
+        # 확 줄어드는 마지막 지점까지를 표면 줄로 보고 그 다음 행을 ROI 위 변으로 쓴다.
+        span_widths = [span[1] - span[0] + 1 if span else 0 for span in spans]
+        skip = 0
+        shrink = SLOT_BALL_RESIDUE_SHRINK
+        for row in range(min(SLOT_BALL_RESIDUE_MAX_ROWS, len(spans) - 3)):
+            after = span_widths[row + 1]
+            if (
+                spans[row] is not None and spans[row + 1] is not None
+                and span_widths[row] - after >= shrink
+                and span_widths[row + 2] >= after - shrink
+                and span_widths[row + 3] >= after - shrink
+            ):
+                skip = row + 1
+        if spans[skip] is None:
+            continue
+        y += skip
+        hits = spans[skip]
+        # ROI 좌·우 폭 안에서 자홍색 기준선부터 위로 올라가며 처음 닿는 검정(0~230)을
+        # ROI 하단으로 정한다. 옆 슬롯에서 넘어온 볼은 ROI 폭 밖이라 영향을 주지 않는다.
+        roi_left, roi_right = x0 + hits[0], x0 + hits[1]
+        dark_rows = np.flatnonzero(
+            (gray[y:max(y, magenta_y) + 1, roi_left:roi_right + 1] <= SLOT_BALL_BOTTOM_MAX).any(axis=1)
+        )
+        roi_bottom = y + int(dark_rows[-1]) if dark_rows.size else y
+        box = (roi_left, y, roi_right, roi_bottom)
+        roi_width, roi_height = box[2] - box[0] + 1, box[3] - box[1] + 1
+        # 1×N, 2×N(N×1, N×2)처럼 선 두께인 영역은 볼이 아니므로 검출 대상에서 뺀다(미검출).
+        if roi_width <= 2 or roi_height <= 2:
+            continue
+        found[slot_index] = (
+            slot_index, roi_width, roi_height, box, _classify_slot_ball(gray, box),
+        )
+    return [
+        found.get(index, (index, None, None, None, BALL_STATUS_MISSING))
+        for index in slot_indices
+    ]
 
 
-def draw_surface_slot_ball_contours(image, contours):
-    """면적 필터를 통과한 모든 볼 후보 컨투어를 초록색으로 표시한다."""
-    if contours:
-        cv2.drawContours(image, contours, -1, (0, 220, 0), 1, cv2.LINE_AA)
+def _classify_slot_ball(gray, box):
+    """볼 ROI를 기형 → 크기 이상(대) → 크기 이상(소) → 검출 순으로 판정한다.
+
+    기형: ROI 하단(마지막 검정 행)의 중앙 x ±3px에 검정(0~230)이 없는 경우.
+    정상 볼은 가장 아래 점이 가운데에 있지만, 한쪽으로 찌그러진 볼은 가운데가 비어 있다.
+    """
+    left, top, right, bottom = box
+    center_x = (left + right) // 2
+    half = SLOT_BALL_CENTER_HALF_WIDTH
+    bottom_center = gray[bottom, max(0, center_x - half):center_x + half + 1]
+    if not (bottom_center <= SLOT_BALL_BOTTOM_MAX).any():
+        return BALL_STATUS_DEFORMED
+    area = (right - left + 1) * (bottom - top + 1)
+    if area >= SLOT_BALL_MAX_AREA:
+        return BALL_STATUS_LARGE
+    if area < SLOT_BALL_MIN_AREA:
+        return BALL_STATUS_SMALL
+    return BALL_STATUS_OK
+
+
+def pad_ball_roi(box, image_shape):
+    """볼 영역을 좌·우·아래로 여유 있게 넓힌 표시용 ROI를 반환한다."""
+    left, top, right, bottom = box
+    height, width = image_shape[:2]
+    pad = SLOT_BALL_ROI_PADDING
+    return (max(0, left - pad), top, min(width - 1, right + pad), min(height - 1, bottom + pad))
+
+
+def draw_surface_slot_ball_boxes(image, measurements):
+    """슬롯별 볼 ROI를 사각형으로 표시한다."""
+    for _, _, _, box, _ in measurements:
+        if box is not None:
+            roi = pad_ball_roi(box, image.shape)
+            cv2.rectangle(image, roi[:2], roi[2:], ROI_COLOR, 1, cv2.LINE_AA)
+
+
+@lru_cache(maxsize=None)
+def _load_preview_font(size):
+    """폰트 파일 읽기가 느려서 크기별로 한 번만 읽는다."""
+    for path in PREVIEW_FONT_CANDIDATES:
+        try:
+            return ImageFont.truetype(path, size)
+        except OSError:
+            continue
+    return None
+
+
+PREVIEW_LABEL_WIDTH = 120
+PREVIEW_LABEL_HEIGHT = 20
+
+
+@lru_cache(maxsize=512)
+def _render_preview_label(text, color):
+    """라벨 한 줄을 BGR 이미지로 그린다. 같은 문구는 다시 그리지 않고 재사용한다."""
+    font = _load_preview_font(14)
+    if font is None:
+        label = np.full((PREVIEW_LABEL_HEIGHT, PREVIEW_LABEL_WIDTH, 3), 255, dtype=np.uint8)
+        cv2.putText(label, text.replace("·", "/"), (6, 14), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4, color[::-1], 1, cv2.LINE_AA)
+        return label
+    # OpenCV 기본 글꼴은 한글을 못 그리므로 라벨은 PIL로 그린다.
+    label = Image.new("RGB", (PREVIEW_LABEL_WIDTH, PREVIEW_LABEL_HEIGHT), (255, 255, 255))
+    ImageDraw.Draw(label).text((6, 2), text, font=font, fill=color)
+    return np.asarray(label)[:, :, ::-1].copy()
+
+
+# 슬롯 수별 위치 이름(한글, 한글 폰트가 없을 때 쓰는 영문)이다.
+SLOT_POSITION_NAMES = {
+    3: (("좌측", "Left"), ("중앙", "Center"), ("우측", "Right")),
+    4: (("좌측", "Left"), ("중앙 좌", "Center L"), ("중앙 우", "Center R"), ("우측", "Right")),
+}
+
+
+def get_slot_position_name(slot_index, slot_count, korean=True):
+    """슬롯 번호를 좌측/중앙/우측 같은 위치 이름으로 바꾼다."""
+    names = SLOT_POSITION_NAMES.get(slot_count)
+    if names is None or not 0 <= slot_index < len(names):
+        return f"Slot {slot_index + 1}"
+    return names[slot_index][0 if korean else 1]
+
+
+def create_slot_ball_preview(image, measurements, slot_count):
+    """슬롯 순서대로 볼 ROI 크롭과 '위치 (W X H)', 판정을 표시한다."""
+    if not measurements:
+        return None
+    source = _as_color_image(image)
+    image_height, image_width = source.shape[:2]
+    scale, box_size, gap = 3, PREVIEW_LABEL_WIDTH, 8
+    label_top = box_size + 2
+    output = np.full(
+        (label_top + 2 * PREVIEW_LABEL_HEIGHT + 4,
+         len(measurements) * box_size + gap * (len(measurements) - 1), 3),
+        255, dtype=np.uint8,
+    )
+    korean = _load_preview_font(14) is not None
+    for index, (slot_index, ball_width, ball_height, box, status) in enumerate(measurements):
+        abnormal = status != BALL_STATUS_OK
+        border = (65, 65, 220) if abnormal else ROI_COLOR
+        tile = output[:, index * (box_size + gap):index * (box_size + gap) + box_size]
+        if box is not None:
+            left, top, right, bottom = pad_ball_roi(box, source.shape)
+            crop = source[max(0, top):min(image_height, bottom + 1),
+                          max(0, left):min(image_width, right + 1)]
+            ratio = min(scale, box_size / max(crop.shape[:2]))
+            crop = cv2.resize(
+                crop, (max(1, round(crop.shape[1] * ratio)), max(1, round(crop.shape[0] * ratio))),
+                interpolation=cv2.INTER_NEAREST,
+            )
+            y0, x0 = (box_size - crop.shape[0]) // 2, (box_size - crop.shape[1]) // 2
+            tile[y0:y0 + crop.shape[0], x0:x0 + crop.shape[1]] = crop
+        else:
+            tile[:box_size] = 235
+        cv2.rectangle(tile, (0, 0), (box_size - 1, box_size - 1), border, 1)
+        title = get_slot_position_name(slot_index, slot_count, korean)
+        if box is not None:
+            title = f"{title} ({ball_width} X {ball_height})"
+        tile[label_top:label_top + PREVIEW_LABEL_HEIGHT] = _render_preview_label(
+            title, (40, 40, 40)
+        )
+        tile[label_top + PREVIEW_LABEL_HEIGHT:label_top + 2 * PREVIEW_LABEL_HEIGHT] = (
+            _render_preview_label(
+                status if korean else BALL_STATUS_ENGLISH[status],
+                (220, 65, 65) if abnormal else (40, 140, 70),
+            )
+        )
+    return output
 
 
 def draw_surface_slot_guides(image, slot_ranges, bottom_cut_line):

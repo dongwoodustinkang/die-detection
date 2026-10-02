@@ -41,26 +41,6 @@ APP_STYLESHEET = """
     QFrame#headerActionGroup QFrame#fileContext {
         background: transparent; border: 0; border-radius: 0;
     }
-    QFrame#detectionResultBadge {
-        background: rgba(118, 118, 128, 0.12);
-        border: 1px solid rgba(60, 60, 67, 0.10); border-radius: 16px;
-    }
-    QLabel#detectionResultLabel {
-        color: #6E6E73; font-size: 17px; font-weight: 700; min-width: 52px;
-        qproperty-alignment: AlignCenter;
-    }
-    QFrame#detectionResultBadge[state="detected"] {
-        background: rgba(52, 199, 89, 0.14); border-color: rgba(52, 199, 89, 0.28);
-    }
-    QFrame#detectionResultBadge[state="detected"] QLabel#detectionResultLabel { color: #248A3D; }
-    QFrame#detectionResultBadge[state="not_detected"] {
-        background: rgba(255, 159, 10, 0.14); border-color: rgba(255, 159, 10, 0.28);
-    }
-    QFrame#detectionResultBadge[state="not_detected"] QLabel#detectionResultLabel { color: #C93400; }
-    QFrame#detectionResultBadge[state="error"] {
-        background: rgba(255, 69, 58, 0.13); border-color: rgba(255, 69, 58, 0.25);
-    }
-    QFrame#detectionResultBadge[state="error"] QLabel#detectionResultLabel { color: #D70015; }
     QLabel#fileContextIcon { color: #007AFF; font-size: 13px; font-weight: 700; }
     QLabel#fileContextLabel { color: #48484A; font-size: 12px; font-weight: 500; }
 
@@ -91,7 +71,6 @@ APP_STYLESHEET = """
         color: #007AFF; font-size: 10px; font-weight: 700;
         background: rgba(10, 132, 255, 0.10); border-radius: 7px; padding: 4px 6px;
     }
-    QLabel#histogramCount { color: #6E6E73; font-size: 11px; font-weight: 500; background: transparent; padding: 0; }
     QFrame#divider { color: rgba(60, 60, 67, 0.14); max-height: 1px; }
 
     /* Image wells are a slightly darker material that keeps high-contrast data legible. */
@@ -107,14 +86,6 @@ APP_STYLESHEET = """
     QPlainTextEdit#infoLabel QScrollBar::add-line:vertical, QPlainTextEdit#infoLabel QScrollBar::sub-line:vertical, QScrollArea#analysisScroll QScrollBar::add-line:vertical, QScrollArea#analysisScroll QScrollBar::sub-line:vertical { height: 0; }
 
     /* Compact controls emulate macOS segmented controls and capsules. */
-    QPushButton#histogramSideButton { background: rgba(118, 118, 128, 0.12); border: 0; border-radius: 8px; color: #6E6E73; font-size: 11px; font-weight: 700; min-height: 27px; min-width: 27px; padding: 0; }
-    QPushButton#histogramSideButton:hover { background: rgba(10, 132, 255, 0.14); color: #007AFF; }
-    QPushButton#histogramSideButton:checked { background: #007AFF; color: #FFFFFF; }
-    QFrame#histogramRegionSelector { background: rgba(118, 118, 128, 0.10); border: 1px solid rgba(60, 60, 67, 0.08); border-radius: 9px; }
-    QLabel#histogramRegionTitle { color: #8E8E93; font-size: 9px; font-weight: 700; }
-    QPushButton#histogramRegionButton { background: transparent; border: 0; border-radius: 6px; color: #6E6E73; font-size: 10px; font-weight: 600; min-height: 21px; min-width: 40px; padding: 0 4px; }
-    QPushButton#histogramRegionButton:hover { color: #007AFF; }
-    QPushButton#histogramRegionButton:checked { background: #FFFFFF; color: #007AFF; }
     QFrame#settingRow { background: rgba(118, 118, 128, 0.09); border: 1px solid rgba(60, 60, 67, 0.08); border-radius: 12px; }
     QLabel#controlLabel { color: #3A3A3C; font-size: 13px; font-weight: 600; }
     QLabel#settingValue { color: #3A3A3C; background: rgba(255, 255, 255, 190); border: 1px solid rgba(60, 60, 67, 0.10); border-radius: 7px; font-size: 12px; font-weight: 600; padding: 5px 8px; }

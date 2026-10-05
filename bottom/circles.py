@@ -6,7 +6,10 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 
+from PIL import Image, ImageDraw
+
 from general import to_bgr
+from side.ball import _load_preview_font
 
 
 ROI_SIZE = 40.0
@@ -210,10 +213,12 @@ def create_circle_roi_preview(image_a, regions):
     """폭을 활용한 3열 × 2행 상세 보기로 여섯 ROI와 실제 윤곽을 확대한다."""
     if not regions:
         return None
-    tile_size, cell_width, cell_height = 128, 152, 184
+    # 타일 아래 캡션 두 줄(약 36px)이 다음 행·아래 끝에 붙지 않도록 셀 높이에 여유를 둔다.
+    tile_size, cell_width, cell_height = 128, 152, 192
     preview = np.full((cell_height * 2, cell_width * 3, 3), 245, dtype=np.uint8)
     target = np.asarray(((0, 0), (tile_size, 0), (tile_size, tile_size), (0, tile_size)), np.float32)
     source = to_bgr(image_a)
+    captions = []
     for region in regions:
         transform = cv2.getPerspectiveTransform(region.corners, target)
         tile = cv2.warpPerspective(source, transform, (tile_size, tile_size), flags=cv2.INTER_NEAREST)
@@ -226,9 +231,38 @@ def create_circle_roi_preview(image_a, regions):
         x = ((region.index - 1) % 3) * cell_width + 12
         y = ((region.index - 1) // 3) * cell_height + 8
         preview[y:y + tile_size, x:x + tile_size] = tile
-        component = region.primary
-        captions = (f'{region.index}  C={component.circularity:.2f}', f'A={component.area:g} px2') if component else (f'{region.index}  --', '')
-        for line, caption in enumerate(captions):
-            cv2.putText(preview, caption, (x, y + tile_size + 18 + line * 18),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.40, color, 1, cv2.LINE_AA)
-    return preview
+        captions.append((x, y + tile_size + 4, _region_captions(region), color))
+    return _draw_region_captions(preview, captions)
+
+
+def _region_captions(region):
+    """ROI 아래 두 줄 캡션(원형도, 면적). 기준을 벗어난 값에는 '(이상)'을 붙인다."""
+    component = region.primary
+    if component is None:
+        return (f"{region.index}  --", "")
+    reasons = component.rejection_reasons
+    circularity_flag = " (이상)" if any("원형도" in reason for reason in reasons) else ""
+    area_flag = " (이상)" if any("면적" in reason for reason in reasons) else ""
+    return (
+        f"{region.index}  원형도 {component.circularity:.2f}{circularity_flag}",
+        f"면적 {component.area:g} px²{area_flag}",
+    )
+
+
+def _draw_region_captions(preview, captions):
+    """OpenCV 기본 글꼴은 한글을 못 그리므로 캡션은 PIL로 한 번에 그린다."""
+    font = _load_preview_font(13)
+    if font is None:
+        for x, y, lines, color in captions:
+            for line, text in enumerate(lines):
+                text = (text.replace("원형도", "C").replace("면적", "A")
+                        .replace(" (이상)", " (NG)").replace("²", "2"))
+                cv2.putText(preview, text, (x, y + 14 + line * 18),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.40, color, 1, cv2.LINE_AA)
+        return preview
+    image = Image.fromarray(preview[:, :, ::-1])
+    draw = ImageDraw.Draw(image)
+    for x, y, lines, color in captions:
+        for line, text in enumerate(lines):
+            draw.text((x, y + line * 18), text, font=font, fill=color[::-1])
+    return np.asarray(image)[:, :, ::-1].copy()

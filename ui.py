@@ -3,7 +3,7 @@ from datetime import datetime
 from pathlib import Path
 from time import perf_counter
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor, QImage, QPixmap
 from PyQt5.QtWidgets import (
     QButtonGroup,
@@ -31,14 +31,14 @@ from bottom.circles import (
 )
 from contour import get_primary_contact_reference_point
 from general import NotesRepository, next_capture_path, to_bgr
-from side.pipeline import measure_ball_arcs, run_side_detection
+from side.ball import get_slot_position_name, get_surface_slot_boundaries
+from side.pipeline import run_side_detection
 from styles import APP_STYLESHEET
 from ui_components import (
     ClickableImageLabel,
     ImageModal,
     InspectionInfoModal,
     NoteModal,
-    TopContourHistogram,
     show_pixel_tooltip, 
 )
 
@@ -62,7 +62,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("불량 검출기")
+        self.setWindowTitle("Semiconductor Image Detection Program")
         self.resize(2120, 880)
         self.setMinimumSize(1200, 720)
 
@@ -79,11 +79,8 @@ class MainWindow(QMainWindow):
         self.source_preview_pixmap = QPixmap()
         self.ball_crop_preview_pixmap = QPixmap()
         self._last_side_result = None
-        self.current_histogram_side = "top"
-        self.current_histogram_region = "all"
-        self.histogram_image_width = 0
-        self.histogram_center_split_x = 0
-        self.histogram_measurements = []
+        # 파일명과 무관하게 사용자가 선택한 슬롯 수로 Side 볼을 검사한다.
+        self.current_ball_slot_count = 3
         self.program_log_lines = []
         self.inspection_info_text = "이미지를 불러오면 상세 정보가 표시됩니다."
         self.notes_repository = NotesRepository(NOTES_CSV_PATH)
@@ -156,8 +153,6 @@ class MainWindow(QMainWindow):
         """Clear an earlier run so files are never analysed with the wrong mode."""
         algorithm_label = ALGORITHM_OPTIONS[self.active_algorithm]["label"]
         self._last_side_result = None
-        self.ball_arc_summary.clear()
-        self.ball_arc_summary.hide()
         self.image_paths = []
         self.current_index = -1
         self.original_pixmap = QPixmap()
@@ -170,9 +165,6 @@ class MainWindow(QMainWindow):
         self.source_preview_pixmap = QPixmap()
         self.ball_crop_preview_pixmap = QPixmap()
         self.capture_session_dir = None
-        self.histogram_image_width = 0
-        self.histogram_center_split_x = 0
-        self.histogram_measurements = []
         self.program_log_lines = []
 
         self.image_label.setPixmap(QPixmap())
@@ -187,13 +179,9 @@ class MainWindow(QMainWindow):
         self.source_preview_label.timing_label.setText("최상단/빈도 + 볼 검출 · — ms")
         self.ball_crop_preview_label.setPixmap(QPixmap())
         self.ball_crop_preview_label.setText("조건을 만족하는 볼이 탐지되면 정사각형 내부가 표시됩니다.")
-        self.top_contour_histogram.set_coordinates(())
-        self.histogram_title.setText("상면 외곽 컨투어 첫 접점 y 좌표 분포 · 전체")
-        self.top_contour_count_label.setText("전체 0개")
         self.inspection_info_text = "이미지를 불러오면 상세 정보가 표시됩니다."
         self.file_context_label.setText("Filename · 선택된 TIFF 이미지 없음")
         self.header_metadata_label.setText(f"{algorithm_label} 알고리즘 · TIFF 이미지를 불러오세요.")
-        self._set_detection_state("idle")
         self.prev_btn.setEnabled(False)
         self.note_btn.setEnabled(False)
         self.next_btn.setEnabled(False)
@@ -204,17 +192,15 @@ class MainWindow(QMainWindow):
     def _configure_algorithm_panels(self):
         """Bottom의 칩 위치 단계와 기존 검사 화면의 표시 항목을 구분한다."""
         is_bottom = self.active_algorithm == "bottom"
-        self.analysis_card_title.setText("원 후보 · A 영상" if is_bottom else "상세 컨투어")
+        self.analysis_card_title.setText("상세 컨투어")
         self.bottom_chip_summary.setVisible(is_bottom)
         self.bottom_chip_summary.setText("칩 기준 6개 영역에서 원 후보를 찾습니다.")
         self.source_preview_label.section_widget.setVisible(is_bottom)
         self.ball_crop_preview_label.section_widget.setVisible(not is_bottom)
-        self.ball_arc_switch.setVisible(self.active_algorithm == "side")
-        self.histogram_controls.setVisible(not is_bottom)
-        self.top_contour_histogram.setVisible(not is_bottom)
+        self.ball_slot_selector.setVisible(self.active_algorithm == "side")
         preview = self.analysis_preview_label
-        preview.title_label.setText("칩 영역 · ROI 검사" if is_bottom else preview.default_title)
-        preview.modal_title = "칩 영역 · ROI 검사" if is_bottom else preview.default_modal_title
+        preview.title_label.setText("크롭된 칩 표면 이미지" if is_bottom else preview.default_title)
+        preview.modal_title = "크롭된 칩 표면 이미지" if is_bottom else preview.default_modal_title
         preview.setText(
             "칩이 검출되면 6개 검색 영역과 실제 윤곽을 표시합니다."
             if is_bottom else preview.default_empty_text
@@ -224,9 +210,9 @@ class MainWindow(QMainWindow):
         )
         detail = self.source_preview_label
         detail.title_label.setText(
-            "6개 영역 · C: 원형도 / A: 면적(px²)" if is_bottom else detail.default_title
+            "6개의 볼 영역 이미지" if is_bottom else detail.default_title
         )
-        detail.modal_title = "원 후보 · 6개 영역 확대" if is_bottom else detail.default_modal_title
+        detail.modal_title = "6개의 볼 영역 이미지" if is_bottom else detail.default_modal_title
         detail.setText("각 검색 영역의 A 영상과 실제 윤곽을 표시합니다." if is_bottom else detail.default_empty_text)
         detail.timing_label.setVisible(not is_bottom)
         detail.setMinimumHeight(360 if is_bottom else 160)
@@ -290,33 +276,7 @@ class MainWindow(QMainWindow):
         action_layout.addWidget(self.detect_btn)
         header.addWidget(action_group)
 
-        self.detection_result_badge = QFrame()
-        self.detection_result_badge.setObjectName("detectionResultBadge")
-        badge_layout = QHBoxLayout(self.detection_result_badge)
-        badge_layout.setContentsMargins(12, 7, 12, 7)
-        self.detection_result_label = QLabel()
-        self.detection_result_label.setObjectName("detectionResultLabel")
-        badge_layout.addWidget(self.detection_result_label)
-        header.addWidget(self.detection_result_badge)
-        self._set_detection_state("idle")
-
         return header
-
-    def _set_detection_state(self, state):
-        state_text = {
-            "idle": "대기",
-            "detected": "검출",
-            "not_detected": "미검출",
-            "error": "오류",
-        }[state]
-        if self.active_algorithm == "bottom":
-            state_text = {"detected": "원 후보 검출", "not_detected": "검토 필요"}.get(
-                state, state_text
-            )
-        self.detection_result_badge.setProperty("state", state)
-        self.detection_result_label.setText(state_text)
-        self.detection_result_badge.style().unpolish(self.detection_result_badge)
-        self.detection_result_badge.style().polish(self.detection_result_badge)
 
     def _create_floating_navigation(self):
         """Keep image navigation close at hand without permanently occupying workspace."""
@@ -467,7 +427,7 @@ class MainWindow(QMainWindow):
 
         self.analysis_preview_label = self._create_preview_section(
             layout,
-            "기둥(상면)·빈도(하면) 기준 · 크롭 비교",
+            "크롭된 상세 표면 이미지",
             "상면은 기둥 기준, 하면은 최상단 빈도 기준선을 적용한 A/B 페이지 크롭 결과를 비교합니다.",
             timing_caption="기둥(상면)+빈도(하면) + 볼 검출",
         )
@@ -479,92 +439,35 @@ class MainWindow(QMainWindow):
         )
         self.ball_crop_preview_label = self._create_preview_section(
             layout,
-            "볼 검출 · 상세 크롭",
-            "조건을 만족하는 볼이 탐지되면 정사각형 내부가 표시됩니다.",
+            "크롭된 상세 볼 이미지",
+            "선택한 슬롯별 표면 하단 기준 ROI를 A 이미지 오버레이에 표시합니다.",
         )
-        self.ball_arc_switch = QPushButton("원호 비교")
-        self.ball_arc_switch.setObjectName("ballArcSwitch")
-        self.ball_arc_switch.setCheckable(True)
-        self.ball_arc_switch.setCursor(Qt.PointingHandCursor)
-        self.ball_arc_switch.setToolTip(
-            "끔: 기존 원본 크롭 / 켬: 약한 선명화 + 하단 접점 + 원호 피팅\n"
-            "반경 10–20 px (원본 기준). 비교용 지표이며 최종 OK/NG 판정이 아닙니다."
-        )
-        self.ball_arc_switch.toggled.connect(self._refresh_ball_preview)
-        self.ball_crop_preview_label.header_layout.addWidget(self.ball_arc_switch)
-        self.ball_arc_summary = QLabel()
-        self.ball_arc_summary.setObjectName("ballArcSummary")
-        self.ball_arc_summary.setWordWrap(True)
-        self.ball_arc_summary.setToolTip(
-            "시험 기준: 원호 오차 ≤ 1.5 px, 대칭 오차 ≤ 2 px, 관측각 ≥ 70°, "
-            "윤곽 열 연속성 ≥ 90%. 경계 접촉·반경 한계는 검토.\n"
-            "OK/NG 데이터 분포로 기준 검증이 필요합니다. 상부 접합부는 평가하지 않습니다."
-        )
-        self.ball_arc_summary.hide()
-        self.ball_crop_preview_label.section_widget.layout().addWidget(self.ball_arc_summary)
-        self.histogram_controls = QWidget()
-        histogram_header = QHBoxLayout(self.histogram_controls)
-        histogram_header.setContentsMargins(0, 0, 0, 0)
-        self.histogram_title = QLabel("상면 외곽 컨투어 첫 접점 y 좌표 분포")
-        self.histogram_title.setObjectName("previewTitle")
-        self.top_contour_count_label = QLabel("전체 0개")
-        self.top_contour_count_label.setObjectName("histogramCount")
-        histogram_header.addWidget(self.histogram_title)
-        histogram_header.addStretch()
-        self.histogram_side_group = QButtonGroup(self)
-        self.histogram_side_group.setExclusive(True)
-        self.histogram_side_buttons = {}
-        for side_key, label_text in (
-            ("top", "상"),
-            ("bottom", "하"),
-            ("left", "좌"),
-            ("right", "우"),
-        ):
+        self.ball_slot_selector = QFrame()
+        self.ball_slot_selector.setObjectName("ballViewSelector")
+        ball_slot_layout = QHBoxLayout(self.ball_slot_selector)
+        ball_slot_layout.setContentsMargins(4, 3, 4, 3)
+        ball_slot_layout.setSpacing(2)
+        ball_slot_label = QLabel("슬롯")
+        ball_slot_label.setObjectName("ballViewLabel")
+        ball_slot_layout.addWidget(ball_slot_label)
+        self.ball_slot_group = QButtonGroup(self)
+        self.ball_slot_group.setExclusive(True)
+        self.ball_slot_buttons = {}
+        for slot_count in (2, 3, 4):
+            label_text = f"{slot_count}개"
+            tooltip = f"표면 하단을 {slot_count}개 슬롯으로 분할해 세로선을 표시합니다."
+            if slot_count == 2:
+                tooltip = "3개 슬롯 중 Slot 1과 Slot 3만 검사합니다."
             button = QPushButton(label_text)
-            button.setObjectName("histogramSideButton")
-            button.setCheckable(True)
-            self.histogram_side_group.addButton(button)
-            self.histogram_side_buttons[side_key] = button
-            histogram_header.addWidget(button)
-        self.histogram_side_buttons[self.current_histogram_side].setChecked(True)
-        self.histogram_side_group.buttonClicked.connect(
-            self._on_histogram_side_changed
-        )
-
-        region_selector = QFrame()
-        region_selector.setObjectName("histogramRegionSelector")
-        region_layout = QVBoxLayout(region_selector)
-        region_layout.setContentsMargins(4, 3, 4, 3)
-        region_layout.setSpacing(2)
-        region_title = QLabel("영역")
-        region_title.setObjectName("histogramRegionTitle")
-        region_title.setAlignment(Qt.AlignCenter)
-        region_layout.addWidget(region_title)
-        self.histogram_region_group = QButtonGroup(self)
-        self.histogram_region_group.setExclusive(True)
-        self.histogram_region_buttons = {}
-        for region_key, label_text, tooltip in (
-            ("all", "전체", "선택한 면의 전체 분포"),
-            ("left", "좌측", "선택한 상·하면의 좌측 분포"),
-            ("right", "우측", "선택한 상·하면의 우측 분포"),
-        ):
-            button = QPushButton(label_text)
-            button.setObjectName("histogramRegionButton")
+            button.setObjectName("ballViewButton")
             button.setCheckable(True)
             button.setToolTip(tooltip)
-            self.histogram_region_group.addButton(button)
-            self.histogram_region_buttons[region_key] = button
-            region_layout.addWidget(button)
-        self.histogram_region_buttons[self.current_histogram_region].setChecked(True)
-        self.histogram_region_group.buttonClicked.connect(
-            self._on_histogram_region_changed
-        )
-        self._update_histogram_region_controls()
-        histogram_header.addWidget(region_selector)
-        histogram_header.addWidget(self.top_contour_count_label)
-        layout.addWidget(self.histogram_controls)
-        self.top_contour_histogram = TopContourHistogram()
-        layout.addWidget(self.top_contour_histogram)
+            self.ball_slot_group.addButton(button)
+            self.ball_slot_buttons[slot_count] = button
+            ball_slot_layout.addWidget(button)
+        self.ball_slot_buttons[self.current_ball_slot_count].setChecked(True)
+        self.ball_slot_group.buttonClicked.connect(self._on_ball_slot_count_changed)
+        self.analysis_preview_label.header_layout.addWidget(self.ball_slot_selector)
         self.analysis_preview_label.clicked.connect(
             lambda: self._show_image_modal(
                 self.analysis_preview_pixmap,
@@ -587,7 +490,7 @@ class MainWindow(QMainWindow):
             )
         )
         for label, modal_title in (
-            (self.analysis_preview_label, "기둥 기준(Blue) A/B 크롭 비교"),
+            (self.analysis_preview_label, "크롭된 상세 표면 이미지"),
             (self.source_preview_label, "최상단/빈도 기준(Gray) A/B 크롭 비교"),
         ):
             label.default_modal_title = modal_title
@@ -797,6 +700,8 @@ class MainWindow(QMainWindow):
         self.file_context_label.setText(f"{path.parent.name}  /  {path.name}")
         position = f"{self.current_index + 1} / {len(self.image_paths)}"
         self.index_label.setText(position.replace(" / ", "/"))
+        # 숫자 자릿수가 바뀌어도 잘리지 않도록 이동 버튼 묶음 크기를 다시 맞춘다.
+        self._position_floating_navigation()
         self.prev_btn.setToolTip(f"이전 이미지 (←) · {position}")
         self.next_btn.setToolTip(f"다음 이미지 (→) · {position}")
         self.prev_btn.setEnabled(self.current_index > 0)
@@ -819,7 +724,9 @@ class MainWindow(QMainWindow):
                 result = run_bottom_detection(path)
                 self._show_bottom_result(path, result, perf_counter() - started_at)
                 return
-            result_image, result = run_side_detection(path)
+            result_image, result = run_side_detection(
+                path, ball_slot_count=self.current_ball_slot_count
+            )
         except ValueError as error:
             if self.active_algorithm == "bottom":
                 self._clear_bottom_result(str(error))
@@ -830,8 +737,6 @@ class MainWindow(QMainWindow):
 
         elapsed_seconds = perf_counter() - started_at
         images_per_second = 1 / max(elapsed_seconds, 0.000001)
-        self.histogram_image_width = result_image.shape[1]
-        self.histogram_center_split_x = result.center_split_x or self.histogram_image_width // 2
         self.raw_original_pixmap = self._pixmap_from_image(to_bgr(result.raw_image_a))
         self.raw_result_pixmap = self._pixmap_from_image(to_bgr(result.raw_image_b))
         self.annotated_original_pixmap = self._pixmap_from_image(
@@ -844,10 +749,9 @@ class MainWindow(QMainWindow):
         self._last_side_result = result
         self._refresh_ball_preview()
         self._show_preview_timings(result)
-        detection_state = "detected" if result.is_detected else "not_detected"
-        self._set_detection_state(detection_state)
         self._update_info_label(path, result, elapsed_seconds, images_per_second)
-        self._show_top_contour_histogram(result.measurements)
+        # 결과 표시 후 레이아웃이 다시 잡히므로 확정된 칸 크기로 한 번 더 맞춘다.
+        QTimer.singleShot(0, self._refresh_scaled_pixmaps)
 
     def _show_bottom_result(self, path, result, elapsed_seconds):
         """A의 ROI와 실제 윤곽, 위치별 조건 검사 결과를 표시한다."""
@@ -861,7 +765,6 @@ class MainWindow(QMainWindow):
         self.analysis_preview_label.timing_label.setText(
             f"원 후보 검사 · {elapsed_seconds * 1000:.1f} ms"
         )
-        self._set_detection_state("detected" if result.all_regions_accepted else "not_detected")
         self.header_metadata_label.setText(
             f"Bottom 원 후보 검사 완료 · {elapsed_seconds * 1000:.1f} ms"
         )
@@ -879,7 +782,6 @@ class MainWindow(QMainWindow):
         chip = result.chip
         if chip is None:
             summary = "완전한 사각 칩 외곽을 찾지 못했습니다."
-            self.detection_result_label.setText("칩 미검출")
             self.analysis_preview_label.setText(summary)
             self.source_preview_label.setText("칩 위치가 없어 원 후보를 검사하지 않았습니다.")
         else:
@@ -933,8 +835,6 @@ class MainWindow(QMainWindow):
     def _clear_bottom_result(self, message):
         """읽기 실패 시 이전 칩의 분석선·크롭·좌표가 남지 않도록 지운다."""
         self._last_side_result = None
-        self.ball_arc_summary.clear()
-        self.ball_arc_summary.hide()
         for attribute in (
             "original_pixmap", "result_pixmap", "raw_original_pixmap", "raw_result_pixmap",
             "annotated_original_pixmap", "annotated_result_pixmap",
@@ -952,7 +852,6 @@ class MainWindow(QMainWindow):
         self.program_log_lines = [message]
         self.inspection_info_text = message
         self.header_metadata_label.setText("Bottom 원 후보 검사 실패")
-        self._set_detection_state("error")
 
     def _show_result_image(self, bgr_image):
         self.result_pixmap = self._pixmap_from_image(bgr_image)
@@ -992,49 +891,32 @@ class MainWindow(QMainWindow):
             preview_scale=1.0 if self.active_algorithm == "bottom" else PREVIEW_SCALE,
         )
 
-    def _refresh_ball_preview(self, _checked=False):
-        """기존 크롭과 하단 원호를 같은 입력에서 전환한다. 재검출은 하지 않는다."""
-        use_arc = self.active_algorithm == "side" and self.ball_arc_switch.isChecked()
+    def _refresh_ball_preview(self):
+        """현재 슬롯 수에 맞는 볼 검사 ROI 안내를 표시한다."""
         self.ball_crop_preview_label.title_label.setText(
-            "볼 검출 · 하단 원호" if use_arc else "볼 검출 · 상세 크롭"
+            f"크롭된 상세 볼 이미지({self.current_ball_slot_count}개 슬롯)"
         )
-        self.ball_arc_summary.clear()
-        self.ball_arc_summary.hide()
         result = self._last_side_result
         if result is None:
             self._show_ball_crop_preview(None)
             return
-        if not use_arc:
-            self._show_ball_crop_preview(result.ball_square_crop_preview)
-            return
-        measure_ball_arcs(result)
-        self._show_ball_crop_preview(result.ball_arc_preview)
-        lines = [
-            f"하늘색: 하단 접점 · 원: 추정 윤곽 · 추가 {result.ball_arc_ms:.1f} ms",
-            "R 반경 / E 원호 오차 / S 대칭 오차 (원본 px) · 시험 기준",
-        ]
-        for index, arc in enumerate(result.ball_arc_measurements, 1):
-            status = {"fitted": "피팅", "review": "검토", "missing": "측정 불가"}[arc.status]
-            if arc.radius is not None:
-                symmetry = f"{arc.symmetry_error:.2f}" if arc.symmetry_error is not None else "—"
-                lines.append(
-                    f"{index}번 {status} · R {arc.radius:.1f} / E {arc.rmse:.2f} / S {symmetry} px"
-                )
-            else:
-                lines.append(f"{index}번 {status}")
-            if arc.reasons:
-                lines.append("  " + " · ".join(arc.reasons))
-        if not result.ball_arc_measurements:
-            lines.append("기존 볼 위치 검출 결과가 없어 분석할 크롭이 없습니다.")
-        self.ball_arc_summary.setText("\n".join(lines))
-        self.ball_arc_summary.show()
+        self._show_ball_crop_preview(result.ball_roi_preview)
+
+    def _on_ball_slot_count_changed(self, button):
+        self.current_ball_slot_count = next(
+            slot_count
+            for slot_count, slot_button in self.ball_slot_buttons.items()
+            if slot_button is button
+        )
+        if self.active_algorithm == "side" and self.image_paths:
+            self._detect_current_image()
 
     def _show_ball_crop_preview(self, bgr_image):
         if bgr_image is None or bgr_image.size == 0:
             self.ball_crop_preview_pixmap = QPixmap()
             self.ball_crop_preview_label.setPixmap(QPixmap())
             self.ball_crop_preview_label.setText(
-                "조건을 만족하는 볼이 탐지되지 않았습니다."
+                "표시할 볼 검사 ROI가 없습니다."
             )
             return
 
@@ -1055,108 +937,6 @@ class MainWindow(QMainWindow):
                 f"최상단/빈도 + 볼 검출 · {result.frequency_with_ball_ms:.1f} ms"
             )
 
-    def _on_histogram_side_changed(self, button):
-        self.current_histogram_side = next(
-            side_key
-            for side_key, side_button in self.histogram_side_buttons.items()
-            if side_button is button
-        )
-        self._update_histogram_region_controls()
-        self._show_top_contour_histogram(self.histogram_measurements)
-
-    def _on_histogram_region_changed(self, button):
-        self.current_histogram_region = next(
-            region_key
-            for region_key, region_button in self.histogram_region_buttons.items()
-            if region_button is button
-        )
-        self._show_top_contour_histogram(self.histogram_measurements)
-
-    def _update_histogram_region_controls(self):
-        """좌·우 분포 필터는 상·하면 y 좌표 분포에서만 사용한다."""
-        enabled = self.current_histogram_side in {"top", "bottom"}
-        for button in self.histogram_region_buttons.values():
-            button.setEnabled(enabled)
-
-    def _show_top_contour_histogram(self, measurements):
-        """선택한 면에 처음 닿는 모든 좌표의 분포를 표시한다."""
-
-        self.histogram_measurements = measurements
-        point_attribute, coordinate_index, title = {
-            "top": ("top_points", 1, "상면 외곽 컨투어 첫 접점 y 좌표 분포"),
-            "bottom": ("bottom_points", 1, "하면 외곽 컨투어 첫 접점 y 좌표 분포"),
-            "left": ("left_points", 0, "좌면 외곽 컨투어 첫 접점 x 좌표 분포"),
-            "right": ("right_points", 0, "우면 외곽 컨투어 첫 접점 x 좌표 분포"),
-        }[self.current_histogram_side]
-        coordinates = [
-            point[coordinate_index]
-            for measurement in measurements
-            for point in getattr(measurement, point_attribute)
-            if (
-                self.current_histogram_side not in {"top", "bottom"}
-                or self.current_histogram_region == "all"
-                or (
-                    point[0] < self.histogram_center_split_x
-                    if self.current_histogram_region == "left"
-                    else point[0] >= self.histogram_center_split_x
-                )
-            )
-        ]
-        coordinate_axis = "y" if coordinate_index == 1 else "x"
-        coordinate_range = self._get_histogram_coordinate_range(
-            measurements, coordinate_index
-        )
-        region_name = {
-            "all": "전체",
-            "left": "좌측",
-            "right": "우측",
-        }[self.current_histogram_region]
-        if self.current_histogram_side not in {"top", "bottom"}:
-            region_name = "전체"
-        self.top_contour_histogram.set_coordinates(
-            coordinates,
-            coordinate_axis,
-            coordinate_range,
-            self.current_histogram_side,
-        )
-        self.inspection_info_text = "\n".join(
-            self.program_log_lines + self.top_contour_histogram.log_lines
-        )
-        self.histogram_title.setText(f"{title} · {region_name}")
-        self.top_contour_count_label.setText(f"{region_name} {len(coordinates):,}개")
-
-    @staticmethod
-    def _get_histogram_coordinate_range(measurements, coordinate_index):
-        """기준선 사각형 안에서 사용할 전체 x/y 좌표 범위를 구한다."""
-
-        ranges = []
-        for measurement in measurements:
-            if coordinate_index == 1:
-                first_point = get_primary_contact_reference_point(
-                    measurement.top_points, 1, use_minimum=True
-                )
-                last_point = get_primary_contact_reference_point(
-                    measurement.bottom_points, 1, use_minimum=False
-                )
-            else:
-                first_point = get_primary_contact_reference_point(
-                    measurement.left_points, 0, use_minimum=True
-                )
-                last_point = get_primary_contact_reference_point(
-                    measurement.right_points, 0, use_minimum=False
-                )
-
-            if first_point is not None and last_point is not None:
-                ranges.append(
-                    (first_point[coordinate_index], last_point[coordinate_index])
-                )
-
-        if not ranges:
-            return None
-        minimum = min(first_coordinate for first_coordinate, _ in ranges)
-        maximum = max(last_coordinate for _, last_coordinate in ranges)
-        return (minimum, maximum) if minimum <= maximum else None
-
     @staticmethod
     def _pixmap_from_image(image):
         image = image.copy()
@@ -1174,7 +954,8 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _set_scaled_pixmap(label, pixmap, preview_scale=1.0):
-        target_size = label.size()
+        # 테두리·여백을 뺀 실제 그림 영역에 맞춰야 위·아래가 잘리지 않는다.
+        target_size = label.contentsRect().size()
         if preview_scale != 1.0:
             target_size.setWidth(round(target_size.width() * preview_scale))
             target_size.setHeight(round(target_size.height() * preview_scale))
@@ -1184,8 +965,6 @@ class MainWindow(QMainWindow):
 
     def _clear_result(self, message):
         self._last_side_result = None
-        self.ball_arc_summary.clear()
-        self.ball_arc_summary.hide()
         self.result_pixmap = QPixmap()
         self.result_label.setPixmap(QPixmap())
         self.result_label.setText(message)
@@ -1204,13 +983,7 @@ class MainWindow(QMainWindow):
         self.ball_crop_preview_label.setText(
             "조건을 만족하는 볼이 탐지되면 정사각형 내부가 표시됩니다."
         )
-        self.top_contour_histogram.set_coordinates(())
-        self.histogram_image_width = 0
-        self.histogram_center_split_x = 0
-        self.histogram_measurements = []
-        self.top_contour_count_label.setText("전체 0개")
         self.header_metadata_label.setText(f"검사 실패 · {message}")
-        self._set_detection_state("error")
 
     def _update_info_label(
         self, path, result=None, elapsed_seconds=None, images_per_second=None
@@ -1226,12 +999,13 @@ class MainWindow(QMainWindow):
             lines.extend(result.density_log_lines)
 
             lines.extend(("", "[볼]"))
-            if not result.selected_ball_bottommost_points:
-                lines.append("검출된 볼 좌표 : 없음")
-            else:
-                lines.append(f"검출된 볼 개수 : {len(result.selected_ball_bottommost_points)}개")
-                for index, point in enumerate(result.selected_ball_bottommost_points, start=1):
-                    lines.append(f"볼 {index} 하단 좌표 : ({point[0]}, {point[1]})")
+            lines.append(f"표면 기준 볼 ROI : {len(result.ball_roi_polygons)}개")
+            slot_count = len(get_surface_slot_boundaries(result.ball_slot_ranges)) - 1
+            for slot_index, ball_width, ball_height, _, status in result.ball_slot_measurements:
+                label = get_slot_position_name(slot_index, slot_count)
+                if ball_width is not None:
+                    label = f"{label} ({ball_width} X {ball_height})"
+                lines.append(f"{label} : {status}")
         self.program_log_lines = lines
         self.inspection_info_text = "\n".join(self.program_log_lines)
 

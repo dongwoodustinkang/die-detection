@@ -1,8 +1,7 @@
-"""검사 화면에서 재사용하는 이미지·차트·모달 구성요소."""
+"""검사 화면에서 재사용하는 이미지·모달 구성요소."""
 
-import numpy as np
 from PyQt5.QtCore import QPoint, Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QPainter, QPen, QPixmap
+from PyQt5.QtGui import QPixmap
 from PyQt5.QtWidgets import (
     QDialog,
     QFrame,
@@ -12,13 +11,9 @@ from PyQt5.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
-    QSizePolicy,
     QToolTip,
     QVBoxLayout,
-    QWidget,
 )
-
-from contour import MAX_COUNT_RATIO
 
 
 def show_pixel_tooltip(label, source_pixmap, position):
@@ -93,204 +88,6 @@ class ClickableImageLabel(QLabel):
     def leaveEvent(self, event):
         QToolTip.hideText()
         super().leaveEvent(event)
-
-
-class TopContourHistogram(QWidget):
-    """상면 컨투어에 처음 닿는 y 좌표의 분포를 표시한다."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.coordinates = []
-        self.coordinate_axis = "y"
-        self.coordinate_range = None
-        self.histogram_side = None
-        self.log_lines = []
-        self.setObjectName("topContourHistogram")
-        self.setMinimumHeight(148)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-
-    def set_coordinates(
-        self, coordinates, coordinate_axis="y", coordinate_range=None,
-        histogram_side=None,
-    ):
-        self.coordinates = [int(coordinate) for coordinate in coordinates]
-        self.coordinate_axis = coordinate_axis
-        self.coordinate_range = coordinate_range
-        self.histogram_side = histogram_side
-        self._print_peak_coordinate_counts()
-        self.update()
-
-    def _print_peak_coordinate_counts(self):
-        """최빈 접점 좌표와 인접 좌표의 접점 수를 터미널에 출력한다."""
-        self.log_lines = []
-        if not self.coordinates:
-            return
-
-        coordinates, counts = np.unique(self.coordinates, return_counts=True)
-        max_count = int(max(counts))
-        peak_coordinates = coordinates[counts == max_count]
-        count_by_coordinate = dict(zip(coordinates, counts))
-
-        ratio_count = max_count * MAX_COUNT_RATIO
-        ratio_log_line = (
-            f"[히스토그램] max_count_ratio={MAX_COUNT_RATIO}: "
-            f"{ratio_count}개"
-        )
-        self.log_lines.append(ratio_log_line)
-        for peak_coordinate in peak_coordinates:
-            peak_coordinate = int(peak_coordinate)
-            previous_count = int(count_by_coordinate.get(peak_coordinate - 1, 0))
-            next_count = int(count_by_coordinate.get(peak_coordinate + 1, 0))
-            coordinate_log_line = (
-                f"[히스토그램] {self.coordinate_axis}={peak_coordinate}: "
-                f"{max_count}개, "
-                f"{self.coordinate_axis}={peak_coordinate - 1}: "
-                f"{previous_count}개, "
-                f"{self.coordinate_axis}={peak_coordinate + 1}: "
-                f"{next_count}개"
-            )
-            self.log_lines.append(coordinate_log_line)
-            for coordinate, count in (
-                (peak_coordinate - 1, previous_count),
-                (peak_coordinate + 1, next_count),
-            ):
-                if count <= ratio_count:
-                    continue
-
-                next_coordinate = coordinate + (1 if coordinate > peak_coordinate else -1)
-                next_count = int(count_by_coordinate.get(next_coordinate, 0))
-                comparison = (
-                    "큽니다" if next_count > ratio_count
-                    else "작습니다" if next_count < ratio_count
-                    else "같습니다"
-                )
-
-        if self.histogram_side not in {"top", "bottom"}:
-            return
-
-        merge_coordinates = set()
-        for peak_coordinate in peak_coordinates:
-            peak_coordinate = int(peak_coordinate)
-            for direction in (-1, 1):
-                adjacent_coordinate = peak_coordinate + direction
-                adjacent_count = int(count_by_coordinate.get(adjacent_coordinate, 0))
-                if adjacent_count <= ratio_count:
-                    continue
-
-                merge_coordinates.add(adjacent_coordinate)
-                next_coordinate = adjacent_coordinate + direction
-                if int(count_by_coordinate.get(next_coordinate, 0)) >= ratio_count:
-                    merge_coordinates.add(next_coordinate)
-
-        highlighted_coordinates = {
-            *(int(coordinate) for coordinate in peak_coordinates),
-            *merge_coordinates,
-        }
-        center_coordinate = (
-            max(highlighted_coordinates)
-            if self.histogram_side == "top"
-            else min(highlighted_coordinates)
-        )
-        side_name = "상판" if self.histogram_side == "top" else "하판"
-
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        rect = self.rect().adjusted(12, 10, -12, -10)
-
-        if not self.coordinates:
-            painter.setPen(QColor("#8E8E93"))
-            painter.drawText(rect, Qt.AlignCenter, "상면 컨투어 접점 좌표가 없습니다.")
-            return
-
-        if self.coordinate_range is None:
-            minimum, maximum = min(self.coordinates), max(self.coordinates)
-        else:
-            minimum, maximum = self.coordinate_range
-
-        if minimum >= maximum:
-            counts = [len(self.coordinates)]
-        else:
-            counts, _ = np.histogram(
-                self.coordinates,
-                # 기준선 내 각 정수 좌표를 하나의 독립적인 막대로 표시한다.
-                # 넓은 기준선 범위를 임의 구간으로 합치면 서로 다른 첫 접점이
-                # 하나의 막대에 합산되어 분포가 왜곡될 수 있다.
-                bins=maximum - minimum + 1,
-                range=(minimum, maximum + 1),
-            )
-
-        left = rect.left() + 30
-        top = rect.top() + 8
-        right = rect.right() - 4
-        bottom = rect.bottom() - 24
-        chart_width, chart_height = right - left, bottom - top
-        if chart_width <= 0 or chart_height <= 0:
-            return
-
-        total_coordinate_count = len(self.coordinates)
-        painter.setPen(QPen(QColor("#D1D1D6"), 1))
-        painter.drawLine(left, bottom, right, bottom)
-        painter.drawLine(left, top, left, bottom)
-
-        bin_width = chart_width / len(counts)
-        # 가장 많은 첫 접점이 모인 좌표(동률 포함)만 강조한다.
-        maximum_count = int(max(counts))
-        ratio_count = maximum_count * MAX_COUNT_RATIO
-        merge_bar_indexes = set()
-        peak_indexes = np.flatnonzero(counts == maximum_count)
-        for peak_index in peak_indexes:
-            for direction in (-1, 1):
-                adjacent_index = peak_index + direction
-                if not 0 <= adjacent_index < len(counts):
-                    continue
-                if counts[adjacent_index] <= ratio_count:
-                    continue
-
-                # 다음 좌표도 같은 기준을 만족할 때만 병합 색상으로 표시한다.
-                merge_bar_indexes.add(adjacent_index)
-                next_index = adjacent_index + direction
-                if (
-                    0 <= next_index < len(counts)
-                    and counts[next_index] >= ratio_count
-                ):
-                    merge_bar_indexes.add(next_index)
-
-        for index, count in enumerate(counts):
-            bar_height = chart_height * int(count) / total_coordinate_count
-            bar_left = left + index * bin_width + 1
-            bar_width = max(1, bin_width - 2)
-            bar_color = (
-                QColor("#FF453A") if count == maximum_count
-                else QColor("#FF9F0A") if index in merge_bar_indexes
-                else QColor("#0A84FF")
-            )
-            painter.fillRect(
-                int(round(bar_left)),
-                int(round(bottom - bar_height)),
-                int(round(bar_width)),
-                int(round(bar_height)),
-                bar_color,
-            )
-
-        painter.setPen(QColor("#6E6E73"))
-        painter.drawText(
-            0, top - 1, left - 5, 16,
-            Qt.AlignRight | Qt.AlignVCenter, str(total_coordinate_count),
-        )
-        painter.drawText(
-            0, bottom - 8, left - 5, 16, Qt.AlignRight | Qt.AlignVCenter, "0"
-        )
-        painter.drawText(
-            left, bottom + 7, 72, 16,
-            Qt.AlignLeft | Qt.AlignVCenter, f"{self.coordinate_axis}={minimum}"
-        )
-        painter.drawText(
-            right - 72, bottom + 7, 72, 16,
-            Qt.AlignRight | Qt.AlignVCenter, f"{self.coordinate_axis}={maximum}",
-        )
-        painter.end()
 
 
 class ImageModal(QDialog):

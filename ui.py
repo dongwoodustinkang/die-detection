@@ -62,7 +62,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("불량 검출기")
+        self.setWindowTitle("Semiconductor Image Detection Program")
         self.resize(2120, 880)
         self.setMinimumSize(1200, 720)
 
@@ -192,15 +192,15 @@ class MainWindow(QMainWindow):
     def _configure_algorithm_panels(self):
         """Bottom의 칩 위치 단계와 기존 검사 화면의 표시 항목을 구분한다."""
         is_bottom = self.active_algorithm == "bottom"
-        self.analysis_card_title.setText("원 후보 · A 영상" if is_bottom else "상세 컨투어")
+        self.analysis_card_title.setText("상세 컨투어")
         self.bottom_chip_summary.setVisible(is_bottom)
         self.bottom_chip_summary.setText("칩 기준 6개 영역에서 원 후보를 찾습니다.")
         self.source_preview_label.section_widget.setVisible(is_bottom)
         self.ball_crop_preview_label.section_widget.setVisible(not is_bottom)
         self.ball_slot_selector.setVisible(self.active_algorithm == "side")
         preview = self.analysis_preview_label
-        preview.title_label.setText("칩 영역 · ROI 검사" if is_bottom else preview.default_title)
-        preview.modal_title = "칩 영역 · ROI 검사" if is_bottom else preview.default_modal_title
+        preview.title_label.setText("크롭된 칩 표면 이미지" if is_bottom else preview.default_title)
+        preview.modal_title = "크롭된 칩 표면 이미지" if is_bottom else preview.default_modal_title
         preview.setText(
             "칩이 검출되면 6개 검색 영역과 실제 윤곽을 표시합니다."
             if is_bottom else preview.default_empty_text
@@ -210,9 +210,9 @@ class MainWindow(QMainWindow):
         )
         detail = self.source_preview_label
         detail.title_label.setText(
-            "6개 영역 · C: 원형도 / A: 면적(px²)" if is_bottom else detail.default_title
+            "6개의 볼 영역 이미지" if is_bottom else detail.default_title
         )
-        detail.modal_title = "원 후보 · 6개 영역 확대" if is_bottom else detail.default_modal_title
+        detail.modal_title = "6개의 볼 영역 이미지" if is_bottom else detail.default_modal_title
         detail.setText("각 검색 영역의 A 영상과 실제 윤곽을 표시합니다." if is_bottom else detail.default_empty_text)
         detail.timing_label.setVisible(not is_bottom)
         detail.setMinimumHeight(360 if is_bottom else 160)
@@ -427,7 +427,7 @@ class MainWindow(QMainWindow):
 
         self.analysis_preview_label = self._create_preview_section(
             layout,
-            "기둥(상면)·빈도(하면) 기준 · 크롭 비교",
+            "크롭된 상세 표면 이미지",
             "상면은 기둥 기준, 하면은 최상단 빈도 기준선을 적용한 A/B 페이지 크롭 결과를 비교합니다.",
             timing_caption="기둥(상면)+빈도(하면) + 볼 검출",
         )
@@ -439,7 +439,7 @@ class MainWindow(QMainWindow):
         )
         self.ball_crop_preview_label = self._create_preview_section(
             layout,
-            "볼 검사 · ROI",
+            "크롭된 상세 볼 이미지",
             "선택한 슬롯별 표면 하단 기준 ROI를 A 이미지 오버레이에 표시합니다.",
         )
         self.ball_slot_selector = QFrame()
@@ -490,7 +490,7 @@ class MainWindow(QMainWindow):
             )
         )
         for label, modal_title in (
-            (self.analysis_preview_label, "기둥 기준(Blue) A/B 크롭 비교"),
+            (self.analysis_preview_label, "크롭된 상세 표면 이미지"),
             (self.source_preview_label, "최상단/빈도 기준(Gray) A/B 크롭 비교"),
         ):
             label.default_modal_title = modal_title
@@ -700,6 +700,8 @@ class MainWindow(QMainWindow):
         self.file_context_label.setText(f"{path.parent.name}  /  {path.name}")
         position = f"{self.current_index + 1} / {len(self.image_paths)}"
         self.index_label.setText(position.replace(" / ", "/"))
+        # 숫자 자릿수가 바뀌어도 잘리지 않도록 이동 버튼 묶음 크기를 다시 맞춘다.
+        self._position_floating_navigation()
         self.prev_btn.setToolTip(f"이전 이미지 (←) · {position}")
         self.next_btn.setToolTip(f"다음 이미지 (→) · {position}")
         self.prev_btn.setEnabled(self.current_index > 0)
@@ -892,7 +894,7 @@ class MainWindow(QMainWindow):
     def _refresh_ball_preview(self):
         """현재 슬롯 수에 맞는 볼 검사 ROI 안내를 표시한다."""
         self.ball_crop_preview_label.title_label.setText(
-            f"볼 검사 · {self.current_ball_slot_count}개 슬롯 · ROI"
+            f"크롭된 상세 볼 이미지({self.current_ball_slot_count}개 슬롯)"
         )
         result = self._last_side_result
         if result is None:
@@ -952,7 +954,8 @@ class MainWindow(QMainWindow):
 
     @staticmethod
     def _set_scaled_pixmap(label, pixmap, preview_scale=1.0):
-        target_size = label.size()
+        # 테두리·여백을 뺀 실제 그림 영역에 맞춰야 위·아래가 잘리지 않는다.
+        target_size = label.contentsRect().size()
         if preview_scale != 1.0:
             target_size.setWidth(round(target_size.width() * preview_scale))
             target_size.setHeight(round(target_size.height() * preview_scale))

@@ -139,7 +139,7 @@ APP_STYLESHEET = """
     QPushButton#floatingNavigationButton:hover { background: rgba(10, 132, 255, 0.16); color: #007AFF; }
     QPushButton#floatingNavigationButton:disabled { color: #C7C7CC; background: rgba(118, 118, 128, 0.06); }
     QLabel#floatingIndexLabel {
-        color: #6E6E73; font-size: 11px; font-weight: 700; min-width: 34px;
+        color: #6E6E73; font-size: 11px; font-weight: 700; min-width: 60px; padding: 0 4px;
         qproperty-alignment: AlignCenter;
     }
     QFrame#floatingNavigation QPushButton#captureIconButton {

@@ -414,9 +414,9 @@ def _create_pillar_preview(image_b, result, pillar):
         # A 밴드 컨투어(상·하단 기준선 + 좌·우 컨투어 외곽) 그대로 두 페이지를 자른다.
         return create_preview_comparison(
             crop_polygon_tile(pillar.source_preview_image, pillar.page_a_contour),
-            "A Page crop",
+            "이미지 A",
             crop_polygon_tile(image_b, pillar.page_a_contour),
-            "B Page crop",
+            "이미지 B",
         )
     a_preview = create_polygon_preview(
         pillar.source_preview_image,
@@ -439,7 +439,7 @@ def _create_pillar_preview(image_b, result, pillar):
         right_reference_line=pillar.right_reference_line,
     )
     return create_preview_comparison(
-        a_preview, "A Page crop", b_preview, "B Page crop"
+        a_preview, "이미지 A", b_preview, "이미지 B"
     )
 
 

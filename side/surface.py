@@ -12,6 +12,9 @@ from contour import (
     get_line_quadrilateral,
 )
 from general import to_bgr, to_bgra, to_grayscale
+from PIL import Image, ImageDraw
+
+from .ball import _load_preview_font
 
 
 ANALYSIS_PREVIEW_MASK_MODE = "contour"
@@ -689,33 +692,44 @@ def crop_polygon_tile(
     return tile
 
 
+# 표면 크롭 프리뷰 확대 배율이다.
+PREVIEW_CROP_SCALE = 2
+
+
 def add_preview_caption(preview, caption):
-    """A/B 비교 미리보기 위에 페이지 구분 제목을 붙인다."""
+    """볼 프리뷰처럼 A/B 비교 미리보기 아래에 페이지 이름을 왼쪽 정렬로 붙인다."""
 
     if preview is None or preview.size == 0:
         return None
 
-    caption_height = 30
+    # 캡션 글씨에 비해 크롭 이미지가 작아 보이지 않도록 이미지를 먼저 키운다.
+    preview = cv2.resize(
+        preview, None, fx=PREVIEW_CROP_SCALE, fy=PREVIEW_CROP_SCALE,
+        interpolation=cv2.INTER_NEAREST,
+    )
+    caption_height = 24
     height, width = preview.shape[:2]
     labeled = np.zeros((height + caption_height, width, 4), dtype=np.uint8)
-    labeled[:caption_height, :, :3] = (245, 245, 245)
-    labeled[:caption_height, :, 3] = 255
-    labeled[caption_height:] = preview
-    cv2.putText(
-        labeled,
-        caption,
-        (8, 21),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.48,
-        (70, 70, 70, 255),
-        1,
-        cv2.LINE_AA,
-    )
+    labeled[:height] = preview
+    font = _load_preview_font(14)
+    if font is None:
+        # 한글 폰트가 없으면 OpenCV 기본 글꼴로 영문 이름을 쓴다.
+        caption = caption.replace("이미지 ", "Image ")
+        cv2.putText(labeled, caption, (2, height + 17), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45, (40, 40, 40, 255), 1, cv2.LINE_AA)
+        return labeled
+    # OpenCV 기본 글꼴은 한글을 못 그리므로 캡션은 PIL로 그린다(BGRA 순서 유지).
+    band = Image.fromarray(labeled[height:].copy(), "RGBA")
+    ImageDraw.Draw(band).text((2, 3), caption, font=font, fill=(40, 40, 40, 255))
+    labeled[height:] = np.asarray(band)
     return labeled
 
 
 def create_preview_comparison(left_preview, left_caption, right_preview, right_caption):
-    """두 페이지의 같은 기준선 크롭 결과를 나란히 합친다."""
+    """두 페이지의 같은 기준선 크롭 결과를 위아래로 합친다.
+
+    가로로 나란히 두면 납작한 이미지가 프리뷰 폭에 맞춰 작게 줄어들어, 위아래로 쌓는다.
+    """
 
     left = add_preview_caption(left_preview, left_caption)
     right = add_preview_caption(right_preview, right_caption)
@@ -725,12 +739,12 @@ def create_preview_comparison(left_preview, left_caption, right_preview, right_c
         return left
 
     gap = 12
-    preview_height = max(left.shape[0], right.shape[0])
-    preview_width = left.shape[1] + gap + right.shape[1]
+    preview_width = max(left.shape[1], right.shape[1])
+    preview_height = left.shape[0] + gap + right.shape[0]
     comparison = np.zeros((preview_height, preview_width, 4), dtype=np.uint8)
     comparison[: left.shape[0], : left.shape[1]] = left
-    right_x = left.shape[1] + gap
-    comparison[: right.shape[0], right_x : right_x + right.shape[1]] = right
+    right_y = left.shape[0] + gap
+    comparison[right_y : right_y + right.shape[0], : right.shape[1]] = right
     return comparison
 
 

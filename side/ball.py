@@ -33,12 +33,19 @@ SLOT_BALL_DARK_MAX = 210
 # 표면 줄이 아니라 작은 볼의 둥근 아래쪽이므로 건너뛰지 않는다.
 SLOT_BALL_RESIDUE_SHRINK = 3
 SLOT_BALL_RESIDUE_MAX_ROWS = 5
+# 표면 잔여가 볼 한쪽에만 붙어 서서히 줄어드는 경우의 보정 조건이다. ROI 위 변부터
+# 이 행 수 안에서 한쪽 끝만 SHRINK(px) 이상 안으로 들어오고 반대쪽은 1px 이하로
+# 움직이면, 들어온 쪽 끝을 2행 연속 같은 위치가 된 곳으로 옮긴다.
+SLOT_BALL_SIDE_RESIDUE_ROWS = 5
 # 자홍색 기준선에서 위로 올라가며 이 값 이하(0~230)를 처음 만나는 행을 볼 하단으로 본다.
 SLOT_BALL_BOTTOM_MAX = 230
 # 볼 판정 기준이다. ROI 하단 행의 중앙 x ±3px에 검정(0~230)이 없으면 기형,
-# 면적(너비×높이)이 30×30 이상이면 크기 이상(대), 20×10보다 작으면 크기 이상(소)이다.
+# 면적(너비×높이) 868 초과, 가로 31px 초과, 세로 27px 초과 중 하나면 크기 이상(대),
+# 면적이 20×10보다 작으면 크기 이상(소)이다.
 SLOT_BALL_CENTER_HALF_WIDTH = 3
-SLOT_BALL_MAX_AREA = 30 * 30
+SLOT_BALL_MAX_AREA = 868
+SLOT_BALL_MAX_WIDTH = 31
+SLOT_BALL_MAX_HEIGHT = 27
 SLOT_BALL_MIN_AREA = 20 * 10
 # 화면 표시·프리뷰용 ROI는 볼 영역에서 좌·우·아래로 이만큼(px) 여유를 둔다.
 # 너비·높이 측정과 판정은 여유 없는 볼 영역으로 한다.
@@ -528,14 +535,17 @@ def find_surface_slot_ball_rois(image, lines, offset_lines, slot_ranges, slot_in
         if spans[skip] is None:
             continue
         y += skip
-        hits = spans[skip]
+        hits = _trim_one_side_residue(gray, y, x0, x1, spans[skip])
         # ROI 좌·우 폭 안에서 자홍색 기준선부터 위로 올라가며 처음 닿는 검정(0~230)을
         # ROI 하단으로 정한다. 옆 슬롯에서 넘어온 볼은 ROI 폭 밖이라 영향을 주지 않는다.
         roi_left, roi_right = x0 + hits[0], x0 + hits[1]
-        dark_rows = np.flatnonzero(
-            (gray[y:max(y, magenta_y) + 1, roi_left:roi_right + 1] <= SLOT_BALL_BOTTOM_MAX).any(axis=1)
+        roi_bottom = _find_ball_bottom(gray, y, magenta_y, roi_left, roi_right)
+        # 볼은 위(표면에 붙은 목)보다 가운데가 더 넓을 수 있어, 볼 몸통 행에서
+        # 가운데와 이어진 어두운 구간까지 좌·우를 넓히고 하단을 다시 찾는다.
+        roi_left, roi_right = _widen_to_ball_body(
+            gray, y, roi_bottom, x0, x1, roi_left, roi_right
         )
-        roi_bottom = y + int(dark_rows[-1]) if dark_rows.size else y
+        roi_bottom = _find_ball_bottom(gray, y, magenta_y, roi_left, roi_right)
         box = (roi_left, y, roi_right, roi_bottom)
         roi_width, roi_height = box[2] - box[0] + 1, box[3] - box[1] + 1
         # 1×N, 2×N(N×1, N×2)처럼 선 두께인 영역은 볼이 아니므로 검출 대상에서 뺀다(미검출).
@@ -550,6 +560,65 @@ def find_surface_slot_ball_rois(image, lines, offset_lines, slot_ranges, slot_in
     ]
 
 
+def _find_ball_bottom(gray, top, magenta_y, left, right):
+    """ROI 좌·우 폭 안에서 자홍색 기준선부터 위로 올라가며 처음 닿는 검정(0~230) 행."""
+    dark_rows = np.flatnonzero(
+        (gray[top:max(top, magenta_y) + 1, left:right + 1] <= SLOT_BALL_BOTTOM_MAX).any(axis=1)
+    )
+    return top + int(dark_rows[-1]) if dark_rows.size else top
+
+
+def _widen_to_ball_body(gray, top, bottom, x0, x1, left, right):
+    """볼 몸통 행에서 중앙과 이어진 어두운 구간이 더 넓으면 ROI 좌·우를 넓힌다.
+
+    표면 잔여가 붙는 위쪽 행(SLOT_BALL_SIDE_RESIDUE_ROWS)은 제외하고, 슬롯 범위
+    안에서 중앙 x와 끊김 없이 이어진 볼 색(0~210) 구간만 본다.
+    """
+    center = (left + right) // 2 - x0
+    start = top + SLOT_BALL_SIDE_RESIDUE_ROWS if bottom - top > SLOT_BALL_SIDE_RESIDUE_ROWS else top
+    for row in gray[start:bottom + 1, x0:x1 + 1] <= SLOT_BALL_DARK_MAX:
+        if not row[center]:
+            continue
+        gaps = np.flatnonzero(~row)
+        run_left = int(gaps[gaps < center].max()) + 1 if (gaps < center).any() else 0
+        run_right = int(gaps[gaps > center].min()) - 1 if (gaps > center).any() else len(row) - 1
+        left, right = min(left, x0 + run_left), max(right, x0 + run_right)
+    return left, right
+
+
+def _trim_one_side_residue(gray, y, x0, x1, span):
+    """볼 한쪽에만 붙은 표면 잔여 때문에 넓게 잡힌 좌·우 끝을 보정한다.
+
+    볼 자체가 둥글게 좁아질 때는 좌·우가 함께 들어오지만, 한쪽에 붙은 잔여 줄은
+    그쪽 끝만 행마다 조금씩 들어온다(예: 오른쪽 끝 55→55→54→52→50→50).
+    """
+    rows = SLOT_BALL_SIDE_RESIDUE_ROWS
+    lefts, rights = [], []
+    for row in gray[y:y + rows + 2, x0:x1 + 1] <= SLOT_BALL_DARK_MAX:
+        cols = np.flatnonzero(row)
+        if not cols.size:
+            return span
+        lefts.append(int(cols[0]))
+        rights.append(int(cols[-1]))
+    if len(lefts) < rows + 2:
+        return span
+    left, right = span
+    for edges, others, inward in ((rights, lefts, -1), (lefts, rights, 1)):
+        for row in range(1, rows + 1):
+            moved = (edges[row] - edges[0]) * inward
+            if (
+                moved >= SLOT_BALL_RESIDUE_SHRINK
+                and abs(others[row] - others[0]) <= 1
+                and edges[row] == edges[row + 1]
+            ):
+                if inward < 0:
+                    right = edges[row]
+                else:
+                    left = edges[row]
+                break
+    return left, right
+
+
 def _classify_slot_ball(gray, box):
     """볼 ROI를 기형 → 크기 이상(대) → 크기 이상(소) → 검출 순으로 판정한다.
 
@@ -562,10 +631,14 @@ def _classify_slot_ball(gray, box):
     bottom_center = gray[bottom, max(0, center_x - half):center_x + half + 1]
     if not (bottom_center <= SLOT_BALL_BOTTOM_MAX).any():
         return BALL_STATUS_DEFORMED
-    area = (right - left + 1) * (bottom - top + 1)
-    if area >= SLOT_BALL_MAX_AREA:
+    roi_width, roi_height = right - left + 1, bottom - top + 1
+    if (
+        roi_width * roi_height > SLOT_BALL_MAX_AREA
+        or roi_width > SLOT_BALL_MAX_WIDTH
+        or roi_height > SLOT_BALL_MAX_HEIGHT
+    ):
         return BALL_STATUS_LARGE
-    if area < SLOT_BALL_MIN_AREA:
+    if roi_width * roi_height < SLOT_BALL_MIN_AREA:
         return BALL_STATUS_SMALL
     return BALL_STATUS_OK
 

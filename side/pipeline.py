@@ -37,7 +37,6 @@ from .surface import (
     apply_side_cutting_mask,
     create_polygon_preview,
     create_preview_comparison,
-    crop_polygon_tile,
     draw_frequency_contact_points,
     draw_left_right_contour_reference_lines,
     draw_side_cutting_boundary,
@@ -58,6 +57,7 @@ from .surface import (
     get_side_cut_line,
     extend_line_to_image_edges,
 )
+from .surface_crop import SurfaceTiles, create_surface_tiles
 
 
 # 임시 실험: False로 바꾸면 Page A 크롭 재검출을 사용하지 않는다.
@@ -79,6 +79,8 @@ class SideDetectionResult:
     fallback_pillar_x_range: Optional[Tuple[int, int]] = None
     measurements: List[ContourMeasurement] = field(default_factory=list)
     analysis_preview: Optional[np.ndarray] = None
+    # 분류 모델 입력과 같은 A/B 표면 Crop 타일(A 밴드 컨투어가 없으면 None)
+    surface_tiles: Optional[SurfaceTiles] = None
     source_preview: Optional[np.ndarray] = None
     source_visualization: Optional[np.ndarray] = None
     density_log_lines: List[str] = field(default_factory=list)
@@ -411,11 +413,12 @@ def _fit_slot_ranges_to_page_a(result, pillar):
 def _create_pillar_preview(image_b, result, pillar):
     """기둥(상면)·빈도(하면) 기준의 A/B Crop 비교 이미지를 만든다."""
     if pillar.page_a_contour is not None:
-        # A 밴드 컨투어(상·하단 기준선 + 좌·우 컨투어 외곽) 그대로 두 페이지를 자른다.
+        # A 밴드 컨투어(상·하단 기준선 + 좌·우 컨투어 외곽) 그대로 자른 학습·추론용 타일을 보여준다.
+        tiles = result.surface_tiles
         return create_preview_comparison(
-            crop_polygon_tile(pillar.source_preview_image, pillar.page_a_contour),
+            tiles.tile_a if tiles else None,
             "이미지 A",
-            crop_polygon_tile(image_b, pillar.page_a_contour),
+            tiles.tile_b if tiles else None,
             "이미지 B",
         )
     a_preview = create_polygon_preview(
@@ -443,19 +446,18 @@ def _create_pillar_preview(image_b, result, pillar):
     )
 
 
-def run_side_detection(image_path, ball_slot_count=3):
-    image_a, image_b = load_ab_tiff_pages(image_path) # 이미지 불러오기
-
+def _analyze_surface(image_a, image_b, image_path=None):
+    """표면 컨투어·컷선·기둥 기준을 계산한다. 검사와 학습 Crop 생성이 함께 쓴다."""
     # 두 이미지의 크기가 일치하지 않는 경우
     if image_a.shape[:2] != image_b.shape[:2]:
         raise ValueError(f"A/B 페이지 크기가 일치하지 않습니다: {image_path}")
 
     # B 페이지를 그레이스케일로 변환
     gray = to_grayscale(image_b)
-    
+
     # B 페이지의 표면 컨투어 추출
     result = _create_base_result(image_a, image_b, gray)
-    
+
     # 하면 기준 컷선 산출(최상단/빈도 계산 기반)
     if USE_TOP_CROPPED_PAGE_B:
         # A 상단 기준선 아래 B 크롭 컨투어로 교체한다(실패하면 B 전체 컨투어 유지).
@@ -467,13 +469,26 @@ def run_side_detection(image_path, ball_slot_count=3):
     ):
         if _retry_surface_from_page_a(image_a, result, gray.shape):
             cuts = _analyze_surface_cuts(result, gray.shape[1])
+
+    # 상면 기준 기둥 탐색 및 시각화(기둥 계산 기반)
+    pillar = _analyze_pillar_surface(image_a, gray.shape, result, cuts=cuts)
+    return gray, result, cuts, pillar
+
+
+def extract_surface_tiles(image_a, image_b):
+    """검사 화면과 같은 방식으로 A/B 표면 Crop 타일만 만든다. 실패하면 None."""
+    _, _, _, pillar = _analyze_surface(image_a, image_b)
+    return create_surface_tiles(image_a, image_b, pillar.page_a_contour)
+
+
+def run_side_detection(image_path, ball_slot_count=3):
+    image_a, image_b = load_ab_tiff_pages(image_path) # 이미지 불러오기
+
+    gray, result, cuts, pillar = _analyze_surface(image_a, image_b, image_path)
     result_image = _create_result_image(gray, result, cuts)
 
     # 표면 기준 볼 ROI 생성 및 시각화
     ball_seconds = _create_ball_rois(gray.shape, result, ball_slot_count)
-
-    # 상면 기준 기둥 탐색 및 시각화(기둥 계산 기반)
-    pillar = _analyze_pillar_surface(image_a, gray.shape, result, cuts=cuts)
     _fit_slot_ranges_to_page_a(result, pillar)
     draw_surface_slot_guides(
         result_image, result.ball_slot_ranges,
@@ -522,6 +537,7 @@ def run_side_detection(image_path, ball_slot_count=3):
 
 
     started_at = perf_counter() # 알고리즘 소요 시간 계산(ms)
+    result.surface_tiles = create_surface_tiles(image_a, image_b, pillar.page_a_contour)
     result.analysis_preview = _create_pillar_preview(image_b, result, pillar)
 
     # 표면 분석 소요 시간 합산

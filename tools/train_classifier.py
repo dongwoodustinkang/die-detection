@@ -29,18 +29,23 @@ LR = 1e-3
 WEIGHT_DECAY = 1e-4
 
 
-def load_split(data_dir, split):
-    """이미지를 읽어 (rows, x, y) 텐서로 만든다."""
+def load_folder(folder):
+    """folder/OK, folder/NG의 *.png를 읽어 (rows, x, y) 텐서로 만든다."""
     rows, tiles = [],[] # 샘플 정보와 이미지(numpy 배열)
     for target, label in enumerate(LABELS):
-        for path in sorted((data_dir / "B" / split / label).glob("*.png")):
+        for path in sorted((folder / label).glob("*.png")):
            rows.append({"sample_id": path.stem, "label": label, "view": path.stem.split("_")[1]}) # 샘플 정보를 row에 담기(파일명, 라벨, 촬영 방향)
            tiles.append(preprocess(cv2.imread(str(path), cv2.IMREAD_GRAYSCALE))) # 이미지 전처리
     if not rows:
-        raise SystemExit(f"이미지가 없습니다: {data_dir / 'B' / split}")
+        raise SystemExit(f"이미지가 없습니다: {folder} (OK/, NG/ 하위 폴더 필요)")
     x = torch.from_numpy(np.stack(tiles)) # (6000, 1, 32, 176) to tensor
     y = torch.tensor([float(LABELS.index(r["label"])) for r in rows]) # label 문자열 -> 0, 1로 변환 (float)
     return rows, x, y
+
+
+def load_split(data_dir, split):
+    """데이터셋의 B/{split} 폴더를 읽는다."""
+    return load_folder(data_dir / "B" / split)
 
 
 def next_model_stem(model_dir, prefix="side_surface_cnn"):

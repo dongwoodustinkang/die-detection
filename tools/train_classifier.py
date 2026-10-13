@@ -34,7 +34,7 @@ def load_folder(folder):
     rows, tiles = [],[] # 샘플 정보와 이미지(numpy 배열)
     for target, label in enumerate(LABELS):
         for path in sorted((folder / label).glob("*.png")):
-           rows.append({"sample_id": path.stem, "label": label, "view": path.stem.split("_")[1]}) # 샘플 정보를 row에 담기(파일명, 라벨, 촬영 방향)
+           rows.append({"sample_id": path.stem, "label": label, "view": path.stem.split("_")[1], "path": path}) # 샘플 정보를 row에 담기(파일명, 라벨, 촬영 방향, 경로)
            tiles.append(preprocess(cv2.imread(str(path), cv2.IMREAD_GRAYSCALE))) # 이미지 전처리
     if not rows:
         raise SystemExit(f"이미지가 없습니다: {folder} (OK/, NG/ 하위 폴더 필요)")

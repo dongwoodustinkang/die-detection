@@ -1,6 +1,7 @@
 """저장된 Side 표면 CNN을 OK/NG 폴더에 돌려 결과를 확인한다."""
 
 import argparse
+import csv
 import sys
 from pathlib import Path
 
@@ -14,6 +15,38 @@ from side.classifier import SurfaceCNN, pick_device
 from tools.train_classifier import DEFAULT_DATA, load_folder
 
 VIEWS = ("Back", "Front", "Left", "Right")
+WRONG_FIELDS = ("error", "sample_id", "label", "pred", "cnn_prob", "threshold", "view", "path")
+
+
+def display_path(path):
+    """저장소 안 경로는 상대 경로로 남겨 다른 PC에서도 CSV를 쓸 수 있게 한다."""
+    try:
+        return path.resolve().relative_to(ROOT).as_posix()
+    except ValueError:
+        return path.resolve().as_posix()
+
+
+def save_wrong_csv(path, rows, probs, pred, ng, threshold):
+    """오분류 샘플을 FN(불량 놓침) → FP(오검출) 순, 각 그룹은 경계에서 먼 것부터 저장한다."""
+    wrong = []
+    for i in np.flatnonzero(pred != ng):
+        row = rows[i]
+        wrong.append({
+            "error": "FN" if ng[i] else "FP",
+            "sample_id": row["sample_id"],
+            "label": row["label"],
+            "pred": "NG" if pred[i] else "OK",
+            "cnn_prob": f"{probs[i]:.4f}",
+            "threshold": threshold,
+            "view": row["view"],
+            "path": display_path(row["path"]),
+        })
+    wrong.sort(key=lambda r: (r["error"] != "FN", -abs(float(r["cnn_prob"]) - threshold)))
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:  # utf-8-sig: 엑셀에서 한글 경로가 깨지지 않게
+        writer = csv.DictWriter(f, fieldnames=WRONG_FIELDS)
+        writer.writeheader()
+        writer.writerows(wrong)
+    return len(wrong)
 
 
 def main():
@@ -22,6 +55,8 @@ def main():
     parser.add_argument("--data", type=Path, default=DEFAULT_DATA / "B" / "test", help="OK/, NG/ 하위 폴더가 포함된 평가 디렉토리") # 테스트를 위한 디렉토리
     parser.add_argument("--threshold", type=float, default=0.5) # NG 판정 기준으로 기본값은 0.5기준으로 판별
     parser.add_argument("--device", default="auto", help="auto | cpu | cuda | mps")
+    parser.add_argument("--output", type=Path, default=None,
+                        help="오분류 CSV 경로 (기본: 모델 옆 {모델명}_wrong_{데이터 폴더명}.csv)")
     args = parser.parse_args()
 
     # 모델 불러오기
@@ -48,8 +83,9 @@ def main():
         mask = views == view
         print(f"  {view:5s} {mask.sum()}장  오류 {int((pred[mask] != ng[mask]).sum())}")
 
-    wrong = [(rows[i]["sample_id"], round(float(probs[i]), 3)) for i in np.flatnonzero(pred != ng)]
-    print(f"오분류 {len(wrong)}장:", wrong)
+    csv_path = args.output or model_path.parent / f"{model_path.stem}_wrong_{data_dir.name}.csv"
+    count = save_wrong_csv(csv_path, rows, probs, pred, ng, args.threshold)
+    print(f"\n[오분류] {count}장 → {display_path(csv_path)}")
 
 
 if __name__ == "__main__":

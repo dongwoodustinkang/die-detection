@@ -130,9 +130,29 @@ def share_by_size(total, group_sizes):
     return shares
 
 
-def assign_splits(samples, counts, seed):
-    """라벨마다 갯수만큼 훈련, 검증, 테스트 세트를 배정"""
+def check_ratios(ratios):
+    """비율은 0 이상이고 합이 0보다 크고 1 이하여야 한다. 합이 1보다 작으면 남는 샘플은 쓰지 않는다."""
+    total = sum(ratios.values())
+    if any(ratio < 0 for ratio in ratios.values()) or not 0 < total <= 1 + 1e-9:
+        given = " ".join(f"--{split} {ratio}" for split, ratio in ratios.items())
+        raise SystemExit(
+            f"비율이 잘못되었습니다: {given} (합 {total:g})\n"
+            "각 비율은 0 이상, 합은 0보다 크고 1 이하여야 합니다. "
+            "예: --train 0.7 --val 0.15 --test 0.15 / 테스트만: --train 0 --val 0 --test 1.0"
+        )
+
+
+def ratios_to_counts(available, ratios):
+    """라벨 하나의 샘플 수를 비율대로 train/val/test 개수로 바꾼다. 비율 합이 1보다 작으면 나머지는 미사용."""
+    weights = dict(ratios, unused=max(0.0, 1 - sum(ratios.values())))
+    counts = share_by_size(available, weights)
+    return {split: counts[split] for split in SPLITS}
+
+
+def assign_splits(samples, ratios, seed):
+    """라벨마다 비율만큼 훈련, 검증, 테스트 세트를 배정하고 라벨별 개수를 돌려준다."""
     rng = np.random.default_rng(seed) # seed 고정
+    counts_by_label = {}
     for label in LABELS: # 각 OK/NG 라벨에 대해
         by_view = defaultdict(list) #촬영 방향별로 딕셔너리 묶기
         for sample in samples:
@@ -140,8 +160,10 @@ def assign_splits(samples, counts, seed):
                 by_view[sample.view].append(sample)
 
         available = sum(len(group) for group in by_view.values()) # 현재 라벨의 총 개수
-        if available < sum(counts.values()): # 현재 라벨의 개수가 원하는 개수보다 적으면 오류
-            raise SystemExit(f"{label} 샘플이 {available}개라 {sum(counts.values())}개를 나눌 수 없습니다.")
+        if available == 0:
+            continue
+        counts = ratios_to_counts(available, ratios) # 비율 → 개수 (예: 4000 × 0.7 = 2800)
+        counts_by_label[label] = counts
 
         for view in sorted(by_view): # 촬영 방향별로
             rng.shuffle(by_view[view]) # 랜덤 섞기
@@ -152,7 +174,7 @@ def assign_splits(samples, counts, seed):
                 for sample in by_view[view][start[view]: start[view] + take]:
                     sample.split = split
                 start[view] += take
-    
+    return counts_by_label
 
 
 # ───────────────────────────────────────────────
@@ -211,7 +233,7 @@ def sample_row(sample):
     )
 
 
-def summarize(args, files, cropped, used, failures):
+def summarize(args, files, cropped, used, failures, counts_by_label):
     def size_range(values):
         return dict(min=int(np.min(values)), median=float(np.median(values)), max=int(np.max(values)))
 
@@ -225,11 +247,12 @@ def summarize(args, files, cropped, used, failures):
         crop_ok=len(cropped),
         crop_failed=len(failures),
         failed_by_label=dict(Counter(row["label"] for row in failures)),
-        per_label=dict(train=args.train, val=args.val, test=args.test),
+        ratios=dict(train=args.train, val=args.val, test=args.test),
+        counts_by_label=counts_by_label,
         used=len(used),
         unused=len(cropped) - len(used),
         by_split=dict(by_split),
-        percent_of_cropped={split: round(100 * by_split[split] / len(cropped), 2) for split in SPLITS},
+        percent_of_cropped={split: round(100 * by_split[split] / len(cropped), 2) for split in SPLITS} if cropped else {},
         by_split_view_label=dict(sorted(Counter(
             f"{sample.split}/{sample.view}/{sample.label}" for sample in used
         ).items())),
@@ -250,7 +273,9 @@ HELP_EPILOG = """\
   python tools/make_data.py                      기본 설정으로 생성
   python tools/make_data.py --overwrite          기존 결과를 지우고 다시 생성
   python tools/make_data.py dataset/원본/A dataset/원본/B --output dataset/side_surface_v2
-  python tools/make_data.py --train 2400 --val 800 --test 800 --seed 7 --overwrite
+  python tools/make_data.py --train 0.6 --val 0.2 --test 0.2 --seed 7 --overwrite
+  python tools/make_data.py dataset/원본/새데이터 --output dataset/새데이터_test --train 0 --val 0 --test 1.0
+                                                 전부 test로 (테스트만 할 경우)
 
 출력 구조:
   <output>/A/<train|val|test>/<OK|NG>/<sample_id>.png    A 그레이스케일 타일
@@ -276,13 +301,15 @@ def main():
     )
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, metavar="DIR",
                         help=f"출력 폴더 (기본: {display_path(DEFAULT_OUTPUT)})")
-    parser.add_argument("--train", type=int, default=2800, metavar="N", help="OK/NG 각각의 train 개수 (기본: 2800)")
-    parser.add_argument("--val", type=int, default=600, metavar="N", help="OK/NG 각각의 val 개수 (기본: 600)")
-    parser.add_argument("--test", type=int, default=600, metavar="N", help="OK/NG 각각의 test 개수 (기본: 600)")
+    parser.add_argument("--train", type=float, default=0.7, metavar="R", help="OK/NG 각각에서 train 비율 (기본: 0.7)")
+    parser.add_argument("--val", type=float, default=0.15, metavar="R", help="OK/NG 각각에서 val 비율 (기본: 0.15)")
+    parser.add_argument("--test", type=float, default=0.15, metavar="R", help="OK/NG 각각에서 test 비율 (기본: 0.15)")
     parser.add_argument("--seed", type=int, default=42, metavar="N", help="분할 셔플 seed, 같으면 분할도 같음 (기본: 42)")
     parser.add_argument("--overwrite", action="store_true", help="출력 폴더가 있으면 지우고 다시 만든다")
     args = parser.parse_args()
 
+    ratios = dict(train=args.train, val=args.val, test=args.test)
+    check_ratios(ratios) # Crop 전에 비율 확인
     check_output(args.output, args.overwrite) # OVERWRITE 체크
 
     files = collect_tiffs(args.inputs) # 이미지 파일 탐색
@@ -290,7 +317,9 @@ def main():
     cropped, failures = crop_images(files) # 모든 이미지 파일 표면 크롭 후 성공 및 실패 결과를 도출
 
     print(f"⬜⬜⬛️ : 분할")
-    assign_splits(cropped, dict(train=args.train, val=args.val, test=args.test), args.seed)
+    counts_by_label = assign_splits(cropped, ratios, args.seed)
+    for label, counts in counts_by_label.items():
+        print(f"  {label}: " + " · ".join(f"{split} {count}" for split, count in counts.items()))
     used = [sample for sample in cropped if sample.split]
 
     print(f"⬜⬜⬜ : 저장 → {args.output}")
@@ -298,7 +327,7 @@ def main():
     save_images(used, args.output)
     write_csv(args.output / "samples.csv", SAMPLE_FIELDS, [sample_row(sample) for sample in used])
     write_csv(args.output / "failed.csv", FAILED_FIELDS, failures)
-    info = summarize(args, files, cropped, used, failures)
+    info = summarize(args, files, cropped, used, failures, counts_by_label)
     (args.output / "dataset_info.json").write_text(json.dumps(info, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(info, ensure_ascii=False, indent=2))
 

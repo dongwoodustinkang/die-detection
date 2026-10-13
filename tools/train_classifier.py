@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from side.classifier import SurfaceCNN, pick_device, preprocess
+from tools.train_graphs import save_history_plot
 
 DEFAULT_DATA = ROOT / "dataset" / "infer" / "side_surface_v1" # 데이터셋 폴더 경로
 BATCH_SIZE = 64
@@ -47,7 +48,7 @@ def next_model_stem(model_dir, prefix="side_surface_cnn"):
     stamp = datetime.now().strftime("%m%d%H")
     stem = f"{prefix}_{stamp}"
     n = 0
-    while any((model_dir / f"{stem}{ext}").exists() for ext in (".pt", ".json")):
+    while any((model_dir / f"{stem}{ext}").exists() for ext in (".pt", ".json", ".png")):
         n += 1
         stem = f"{prefix}_{stamp}_{n:02d}"
     return stem
@@ -78,11 +79,16 @@ def train(model, loaders, device):
     criterion = nn.BCEWithLogitsLoss() # 손실 함수
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     best_loss, best_state, best_epoch, wait = float("inf"), None, 0 ,0
+    history = {"train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []} # 그래프용 epoch별 기록
 
     for epoch in range(1, EPOCHS + 1):
         train_loss, train_acc = run_epoch(model, loaders["train"], criterion, device, optimizer) # 학습 에폭
         val_loss, val_acc = run_epoch(model, loaders["val"], criterion, device) # 검증 에폭
-        print(f"[{epoch:2d}] 1️⃣ 학습세트 loss {train_loss:.4f} 정확도 {train_acc:.4f} | 2️⃣ 검증세트 loss {val_loss:.4f} 정확도 {val_acc:.4f}")
+        history["train_loss"].append(train_loss)
+        history["train_acc"].append(train_acc)
+        history["val_loss"].append(val_loss)
+        history["val_acc"].append(val_acc)
+        print(f"[{epoch:2d}] 1️⃣  학습세트 loss {train_loss:.4f} 정확도 {train_acc:.4f} | 2️⃣  검증세트 loss {val_loss:.4f} 정확도 {val_acc:.4f}")
         if val_loss < best_loss:
             best_loss, best_state, best_epoch, wait = val_loss, copy.deepcopy(model.state_dict()), epoch, 0
         else:
@@ -93,7 +99,7 @@ def train(model, loaders, device):
 
     print(f"[BEST👍] 최고 검증 epoch {best_epoch} : loss {best_loss:.4f}")
     model.load_state_dict(best_state)
-    return model
+    return model, history, best_epoch
 
 
 def main():
@@ -115,12 +121,13 @@ def main():
     print(f"[device] {device}")
 
     model = SurfaceCNN().to(device)
-    model = train(model, loaders, device)
+    model, history, best_epoch = train(model, loaders, device)
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     stem = next_model_stem(MODEL_DIR)
     weight_path = MODEL_DIR / f"{stem}.pt"
     torch.save({k: v.cpu() for k, v in model.state_dict().items()}, weight_path)
-    print(f"저장: {weight_path}")
+    save_history_plot(history, best_epoch, MODEL_DIR / f"{stem}.png")
+    print(f"저장: {weight_path} (+ .png)")
 
 
 if __name__ == "__main__":

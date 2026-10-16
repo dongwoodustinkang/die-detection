@@ -4,7 +4,7 @@ Side 검사 이미지(A/B 2페이지 TIFF)에서 **표면 타일을 잘라 → �
 
 ```
 원본 TIFF (A/B 2페이지)
-   │  ① tools/make_data.py        표면 크롭 + train/val/test 분할
+   │  ① tools/make_data.py        표면 크롭 + train/val/test 비율 분할
    ▼
 dataset/infer/side_surface_v1/   A/, B/ PNG 타일 + samples.csv
    │  ② tools/train_classifier.py  B 타일로 CNN 학습
@@ -12,7 +12,7 @@ dataset/infer/side_surface_v1/   A/, B/ PNG 타일 + samples.csv
 models/side_surface_cnn_MMDDHH.pt (+ .png 학습 그래프)
    │  ③ tools/eval_classifier.py   OK/NG 폴더로 성능 확인
    ▼
-정확도 · TP/FN/FP/TN · 방향별 오류 · 오분류 목록
+정확도 · TP/FN/FP/TN · 방향별 오류 (터미널) + 오분류 CSV
 ```
 
 ---
@@ -116,18 +116,32 @@ NG_Back_20261006_130531_990_0001.tiff
 3. 라벨(OK/NG)과 방향(Back/Front/Left/Right)을 읽습니다.
    - 라벨: 상위 폴더 이름이 `OK`/`NG`이면 그것을, 아니면 파일명 앞부분(`OK_...`, `NG_...`)을 씁니다.
    - 방향: 파일명 두 번째 토큰 (`NG_Back_...` → `Back`)
-4. 라벨별로, 방향 비율을 유지하면서 train/val/test로 무작위 분할합니다 (`--seed`가 같으면 분할도 같음).
+4. 라벨별로 **비율**에 맞춰 train/val/test 개수를 정하고, 방향 비율을 유지하면서 무작위 분할합니다 (`--seed`가 같으면 분할도 같음).
+   - 크롭에 성공한 실제 샘플 수에 비율을 곱하므로, 샘플 수가 딱 떨어지지 않아도 됩니다 (예: 3997장 × 0.7/0.15/0.15 → 2798/600/599).
+   - 소수점 때문에 남는 1~2장은 소수점이 큰 split부터 채워서, 세 split을 더하면 항상 전체 개수가 됩니다.
+   - 비율 합이 1보다 작으면 남는 샘플은 어느 split에도 넣지 않습니다 (`dataset_info.json`의 `unused`).
 5. 그레이스케일 PNG(무손실)로 저장합니다.
 
 ### 현재 데이터셋을 다시 만드는 명령
 
-지금 쓰는 `dataset/infer/side_surface_v1`은 아래 설정으로 만들어졌습니다 (`dataset_info.json` 기준).
+지금 쓰는 `dataset/infer/side_surface_v1`은 OK/NG 각각 3000/500/500장, seed 7로 만들어졌습니다. 비율로 바꾸면 0.75/0.125/0.125이고, 아래 명령으로 다시 만들면 8000장 모두 같은 split에 들어갑니다.
 
 ```bash
-python tools/make_data.py dataset/원본/Side_Demo_1006 --output dataset/infer/side_surface_v1 --train 3000 --val 500 --test 500 --seed 7 --overwrite
+python tools/make_data.py dataset/원본/Side_Demo_1006 --output dataset/infer/side_surface_v1 --train 0.75 --val 0.125 --test 0.125 --seed 7 --overwrite
 ```
 
-> 기본값(`--output dataset/side_surface`, 2800/600/600, seed 42)과 다르니, 같은 데이터셋이 필요하면 위 옵션을 그대로 쓰세요.
+> 기본값(`--output dataset/side_surface`, 0.7/0.15/0.15, seed 42)과 다르니, 같은 데이터셋이 필요하면 위 옵션을 그대로 쓰세요.
+> v1을 만들 때는 개수로 지정하던 이전 버전이라, v1의 `dataset_info.json`에는 `ratios` 대신 `per_label`(개수)이 적혀 있습니다.
+
+### 테스트(평가) 전용 데이터 만들기
+
+다른 날짜 데이터처럼 **평가에만 쓸 데이터**는 train/val을 0으로 두면 전부 test로 들어갑니다.
+
+```bash
+python tools/make_data.py dataset/Test_1013 --output dataset/infer/side_surface_test_1013 --train 0 --val 0 --test 1.0
+```
+
+결과의 `B/test` 폴더를 그대로 `eval_classifier.py --data`에 넣으면 됩니다 (`train/`, `val/` 폴더는 비어 있음).
 
 ### 옵션
 
@@ -135,9 +149,11 @@ python tools/make_data.py dataset/원본/Side_Demo_1006 --output dataset/infer/s
 |---|---|---|
 | `INPUT_DIR ...` | `dataset/원본/Side_Demo_1006` | TIFF가 있는 폴더. 여러 개 지정 가능 |
 | `--output` | `dataset/side_surface` | 출력 폴더 |
-| `--train` / `--val` / `--test` | 2800 / 600 / 600 | **OK, NG 각각**의 개수 |
+| `--train` / `--val` / `--test` | 0.7 / 0.15 / 0.15 | **OK, NG 각각**에서 가져갈 비율. 0 이상, 합은 1 이하 |
 | `--seed` | 42 | 분할 셔플 seed |
 | `--overwrite` | 꺼짐 | 출력 폴더가 있으면 지우고 다시 생성 |
+
+비율이 잘못되면(예: `--train 0.7 --val 0.3 --test 0.3`, 합 1.3) 크롭을 시작하기 전에 바로 멈춥니다.
 
 ### 출력 구조
 
@@ -147,7 +163,7 @@ dataset/infer/side_surface_v1/
 ├── B/{train,val,test}/{OK,NG}/{sample_id}.png   배경 평탄화, 결함만 어둡게 (TIFF 2페이지) ← 학습에 사용
 ├── samples.csv        샘플별 split·label·view·크기·크롭 좌표
 ├── failed.csv         크롭 실패 목록과 사유
-└── dataset_info.json  개수·비율·seed 요약
+└── dataset_info.json  비율(ratios)·라벨별 실제 개수(counts_by_label)·seed 요약
 ```
 
 현재 데이터: 8000장 = 4방향 × OK/NG × 1000장, train 6000 / val 1000 / test 1000, 크롭 실패 0장.
@@ -241,6 +257,30 @@ python tools/eval_classifier.py --model models/side_surface_cnn_101310.pt --data
 | `--data` | `dataset/infer/side_surface_v1/B/test` | `OK/`, `NG/` 하위 폴더가 있는 평가 폴더 |
 | `--threshold` | 0.5 | NG 확률이 이 값 이상이면 NG로 판정 |
 | `--device` | `auto` | 계산 장치 |
+| `--output` | 모델 옆 `{모델명}_wrong_{데이터 폴더명}.csv` | 오분류 CSV 저장 경로 |
+
+### 오분류 CSV
+
+터미널에는 요약만 출력하고, 틀린 샘플은 CSV로 저장합니다. 오분류가 0장이어도 헤더만 있는 파일이 만들어집니다.
+
+```
+models/side_surface_cnn_101310_wrong_test.csv    ← --data .../B/test 평가 결과
+models/side_surface_cnn_101310_wrong_val.csv     ← --data .../B/val 평가 결과
+```
+
+| 컬럼 | 내용 |
+|---|---|
+| `error` | `FN`(NG를 놓침) 또는 `FP`(OK를 NG로 판정) |
+| `sample_id` | 확장자를 뺀 파일명 |
+| `label` / `pred` | 실제 라벨 / 모델 판정 |
+| `cnn_prob` | NG 확률(점수), 소수점 4자리 |
+| `threshold` | 평가에 쓴 판정 기준 |
+| `view` | 촬영 방향 |
+| `path` | 이미지 경로 (프로젝트 안이면 상대 경로) |
+
+- 정렬: **FN 먼저**, 같은 종류 안에서는 threshold에서 **멀리 벗어난(확실히 틀린) 샘플부터**. 위에서부터 이미지를 열어 보면 됩니다.
+- `utf-8-sig`로 저장해서 Windows 엑셀에서도 한글 경로가 깨지지 않습니다.
+- 같은 모델·같은 폴더 이름으로 다시 평가하면 덮어씁니다. threshold별로 남기려면 `--output`을 지정하세요.
 
 ### 결과 읽는 법
 
@@ -251,7 +291,7 @@ python tools/eval_classifier.py --model models/side_surface_cnn_101310.pt --data
 | **FP** | OK를 NG로 잘못 판정 → 재검사 비용 |
 | **TN** | OK를 OK로 맞힘 |
 | 방향별 오류 | Back/Front/Left/Right 중 특정 방향만 약한지 확인 |
-| 오분류 목록 | 틀린 샘플의 `sample_id`와 NG 확률. 이미지를 직접 열어 원인 확인 |
+| 오분류 CSV | 틀린 샘플의 경로와 NG 확률. 이미지를 직접 열어 원인 확인 |
 
 ### 주의
 
@@ -327,6 +367,7 @@ python tools/eval_classifier.py --model models/side_surface_cnn_101310.pt --data
 | `이미지가 없습니다: ... (OK/, NG/ 하위 폴더 필요)` | 경로가 틀렸거나 폴더 구조가 다름. `DEFAULT_DATA` 또는 `--data` 확인 |
 | `ModuleNotFoundError: No module named 'tools'` / `'side'` | 프로젝트 루트가 아닌 곳에서 실행했거나, `sys.path.insert(0, str(ROOT))`보다 앞에서 import함 |
 | `the following arguments are required: --model` | `eval_classifier.py`는 `--model`이 필수 |
+| `비율이 잘못되었습니다: ... (합 1.3)` | `make_data.py`의 `--train/--val/--test`는 개수가 아니라 비율. 합을 1 이하로 (예: 0.7/0.15/0.15, 테스트만: 0/0/1.0) |
 | `KeyError: 'sample_id'` (CSV 읽을 때) | BOM 때문. `encoding="utf-8-sig"`로 열기 |
 | Windows에서 이미지가 `None` | 한글 경로 문제. 경로를 영문으로 바꾸기 |
 | 학습 그래프의 한글이 □로 깨짐 | matplotlib 기본 폰트에 한글 없음. 라벨은 영문 유지 |

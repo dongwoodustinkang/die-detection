@@ -43,9 +43,9 @@ def load_folder(folder):
     return rows, x, y
 
 
-def load_split(data_dir, split):
+def load_split(data_dir, split, kind="A"):
     """데이터셋의 B/{split} 폴더를 읽는다."""
-    return load_folder(data_dir / "B" / split)
+    return load_folder(data_dir / kind / split)
 
 
 def next_model_stem(model_dir, prefix="side_surface_cnn"):
@@ -110,13 +110,14 @@ def train(model, loaders, device):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default="auto", help="auto | cpu | cuda | mps")
+    parser.add_argument("--kind", choices=("A", "B"), default="A", help="A or B")
     args = parser.parse_args()
 
     torch.manual_seed(7)
     device = pick_device(args.device)
     data_dir = DEFAULT_DATA 
 
-    data = {split: load_split(data_dir, split) for split in ("train", "val", "test")} 
+    data = {split: load_split(data_dir, split, args.kind) for split in ("train", "val", "test")} 
     loaders = {
         split: DataLoader(TensorDataset(x, y), batch_size=BATCH_SIZE, shuffle=(split == "train"))
         for split, (_, x, y) in data.items()
@@ -128,7 +129,7 @@ def main():
     model = SurfaceCNN().to(device)
     model, history, best_epoch = train(model, loaders, device)
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
-    stem = next_model_stem(MODEL_DIR)
+    stem = next_model_stem(MODEL_DIR, prefix=f"side_surface_cnn{args.kind}")
     weight_path = MODEL_DIR / f"{stem}.pt"
     torch.save({k: v.cpu() for k, v in model.state_dict().items()}, weight_path)
     save_history_plot(history, best_epoch, MODEL_DIR / f"{stem}.png")

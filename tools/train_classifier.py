@@ -1,4 +1,5 @@
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -14,6 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from side.classifier import SurfaceCNN, pick_device, preprocess
+from tools.make_data import display_path
 from tools.train_graphs import save_history_plot
 
 DEFAULT_DATA = ROOT / "dataset" / "infer" / "side_surface_v1" # 데이터셋 폴더 경로
@@ -22,7 +24,7 @@ LABELS = ("OK", "NG")
 
 # MODEL ───────────────────────────────────────────────
 
-MODEL_DIR = ROOT / "models"
+MODEL_DIR = ROOT / "models" / "Classifier"
 EPOCHS = 30
 PATIENCE = 5
 LR = 1e-3
@@ -44,8 +46,14 @@ def load_folder(folder):
 
 
 def load_split(data_dir, split, kind="A"):
-    """데이터셋의 B/{split} 폴더를 읽는다."""
-    return load_folder(data_dir / kind / split)
+    """데이터셋의 {kind}/{split} 폴더를 읽는다. kind="AB"는 같은 파일명의 A·B 타일을 채널로 겹친다."""
+    if kind != "AB":
+        return load_folder(data_dir / kind / split)
+    rows, x_a, y = load_folder(data_dir / "A" / split)
+    rows_b, x_b, _ = load_folder(data_dir / "B" / split)
+    if [r["sample_id"] for r in rows] != [r["sample_id"] for r in rows_b]:
+        raise SystemExit(f"A/{split}와 B/{split}의 파일 목록이 다릅니다: {data_dir}")
+    return rows, torch.cat([x_a, x_b], dim=1), y
 
 
 def next_model_stem(model_dir, prefix="side_surface_cnn"):
@@ -110,12 +118,14 @@ def train(model, loaders, device):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--device", default="auto", help="auto | cpu | cuda | mps")
-    parser.add_argument("--kind", choices=("A", "B"), default="A", help="A or B")
+    parser.add_argument("--kind", choices=("A", "B", "AB"), default="A", help="A | B | AB (A·B를 채널로 겹침)")
+    parser.add_argument("--data", type=Path, default=DEFAULT_DATA,
+                        help="A|B/{train,val,test}/{OK,NG} 형식 데이터셋 폴더 (예: dataset/infer/side_surface_det_v1)")
     args = parser.parse_args()
 
     torch.manual_seed(7)
     device = pick_device(args.device)
-    data_dir = DEFAULT_DATA 
+    data_dir = args.data.resolve()
 
     data = {split: load_split(data_dir, split, args.kind) for split in ("train", "val", "test")} 
     loaders = {
@@ -126,14 +136,16 @@ def main():
         print(f"[{split}] {len(rows)}장  x={tuple(x.shape)}  NG 비율 {y.mean():.2f}")
     print(f"[device] {device}")
 
-    model = SurfaceCNN().to(device)
+    model = SurfaceCNN(in_ch=len(args.kind)).to(device)
     model, history, best_epoch = train(model, loaders, device)
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     stem = next_model_stem(MODEL_DIR, prefix=f"side_surface_cnn{args.kind}")
     weight_path = MODEL_DIR / f"{stem}.pt"
     torch.save({k: v.cpu() for k, v in model.state_dict().items()}, weight_path)
     save_history_plot(history, best_epoch, MODEL_DIR / f"{stem}.png")
-    print(f"저장: {weight_path} (+ .png)")
+    config = dict(kind=args.kind, data=display_path(data_dir), model="SurfaceCNN", best_epoch=best_epoch)
+    (MODEL_DIR / f"{stem}.json").write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"저장: {weight_path} (+ .png, .json)")
 
 
 if __name__ == "__main__":

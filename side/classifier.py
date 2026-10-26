@@ -42,10 +42,10 @@ def conv_block(in_ch, out_ch, pool=True):
 class SurfaceCNN(nn.Module):
     """## OK/NG 분류용 경량 CNN"""
 
-    def __init__(self):
+    def __init__(self, in_ch=1):  # in_ch=2는 A·B를 채널로 겹친 입력
         super().__init__()
         self.features = nn.Sequential(
-            conv_block(1, 16), # 16, 16, 88
+            conv_block(in_ch, 16), # 16, 16, 88
             conv_block(16, 32), # 32, 8, 44
             conv_block(32, 64), # 64, 4, 22
             conv_block(64, 64, pool=False),

@@ -4,13 +4,13 @@ Side 검사 이미지(A/B 2페이지 TIFF)에서 **표면 타일을 잘라 → �
 
 ```
 원본 TIFF (A/B 2페이지)
-   │  ① tools/make_data.py        표면 크롭 + train/val/test 비율 분할
+   │  ① tools/data/make_data.py          표면 크롭 + train/val/test 비율 분할
    ▼
 dataset/infer/side_surface_v1/   A/, B/ PNG 타일 + samples.csv
-   │  ② tools/train_classifier.py  B 타일로 CNN 학습
+   │  ② tools/train/train_classifier.py  B 타일로 CNN 학습
    ▼
 models/side_surface_cnn_MMDDHH.pt (+ .png 학습 그래프)
-   │  ③ tools/eval_classifier.py   OK/NG 폴더로 성능 확인
+   │  ③ tools/eval/eval_classifier.py    OK/NG 폴더로 성능 확인
    ▼
 정확도 · TP/FN/FP/TN · 방향별 오류 (터미널) + 오분류 CSV
 ```
@@ -106,7 +106,7 @@ NG_Back_20261006_130531_990_0001.tiff
 
 ---
 
-## 1. 데이터셋 만들기 — `tools/make_data.py`
+## 1. 데이터셋 만들기 — `tools/data/make_data.py`
 
 ### 하는 일
 
@@ -127,7 +127,7 @@ NG_Back_20261006_130531_990_0001.tiff
 지금 쓰는 `dataset/infer/side_surface_v1`은 OK/NG 각각 3000/500/500장, seed 7로 만들어졌습니다. 비율로 바꾸면 0.75/0.125/0.125이고, 아래 명령으로 다시 만들면 8000장 모두 같은 split에 들어갑니다.
 
 ```bash
-python tools/make_data.py dataset/원본/Side_Demo_1006 --output dataset/infer/side_surface_v1 --train 0.75 --val 0.125 --test 0.125 --seed 7 --overwrite
+python tools/data/make_data.py dataset/원본/Side_Demo_1006 --output dataset/infer/side_surface_v1 --train 0.75 --val 0.125 --test 0.125 --seed 7 --overwrite
 ```
 
 > 기본값(`--output dataset/side_surface`, 0.7/0.15/0.15, seed 42)과 다르니, 같은 데이터셋이 필요하면 위 옵션을 그대로 쓰세요.
@@ -138,7 +138,7 @@ python tools/make_data.py dataset/원본/Side_Demo_1006 --output dataset/infer/s
 다른 날짜 데이터처럼 **평가에만 쓸 데이터**는 train/val을 0으로 두면 전부 test로 들어갑니다.
 
 ```bash
-python tools/make_data.py dataset/Test_1013 --output dataset/infer/side_surface_test_1013 --train 0 --val 0 --test 1.0
+python tools/data/make_data.py dataset/Test_1013 --output dataset/infer/side_surface_test_1013 --train 0 --val 0 --test 1.0
 ```
 
 결과의 `B/test` 폴더를 그대로 `eval_classifier.py --data`에 넣으면 됩니다 (`train/`, `val/` 폴더는 비어 있음).
@@ -171,23 +171,26 @@ dataset/infer/side_surface_v1/
 
 ---
 
-## 2. 학습 — `tools/train_classifier.py`
+## 2. 학습 — `tools/train/train_classifier.py`
 
 ### 실행
 
 ```bash
-python tools/train_classifier.py
+python tools/train/train_classifier.py
 ```
 
 ```bash
-python tools/train_classifier.py --device cpu
+python tools/train/train_classifier.py --device cpu
 ```
 
 | 옵션 | 기본값 | 설명 |
 |---|---|---|
 | `--device` | `auto` | `auto`(CUDA → MPS → CPU) / `cpu` / `cuda` / `mps` |
+| `--kind` | `A` | 학습에 쓸 표면 타일 (`A` 원본 / `B` 평탄화) |
+| `--data` | `dataset/infer/side_surface_v1` | `A|B/{train,val,test}/{OK,NG}` 형식 데이터셋 폴더 (9장: `side_surface_det_v1`) |
 
-데이터 경로·하이퍼파라미터는 파일 상단 상수로 바꿉니다.
+모델은 `models/Classifier/side_surface_cnn{A|B}_MMDDHH.pt`로 저장되고, 옆 `.json`에 `kind`·`data`·`best_epoch`가 남습니다.
+하이퍼파라미터는 파일 상단 상수로 바꿉니다.
 
 | 상수 | 값 | 의미 |
 |---|---|---|
@@ -237,24 +240,25 @@ MPS 기준 epoch당 약 1.4초, CPU는 약 8~9초입니다.
 
 ---
 
-## 3. 평가 — `tools/eval_classifier.py`
+## 3. 평가 — `tools/eval/eval_classifier.py`
 
 학습을 다시 하지 않고, 저장된 모델로 `OK/`·`NG/` 폴더를 평가합니다.
 
 ### 실행
 
 ```bash
-python tools/eval_classifier.py --model models/side_surface_cnn_101310.pt
+python tools/eval/eval_classifier.py --model models/side_surface_cnn_101310.pt
 ```
 
 ```bash
-python tools/eval_classifier.py --model models/side_surface_cnn_101310.pt --data dataset/infer/side_surface_v1/B/val --threshold 0.08
+python tools/eval/eval_classifier.py --model models/side_surface_cnn_101310.pt --data dataset/infer/side_surface_v1/B/val --threshold 0.08
 ```
 
 | 옵션 | 기본값 | 설명 |
 |---|---|---|
 | `--model` | **필수** | 평가할 `.pt` 파일 |
 | `--data` | `dataset/infer/side_surface_v1/B/test` | `OK/`, `NG/` 하위 폴더가 있는 평가 폴더 |
+| `--tiff`, `--views` | – | 원본 TIFF 폴더를 `make_od_data.py`와 같은 표면 타일로 즉석 크롭해 평가 (A/B는 모델 옆 `.json`의 `kind`) |
 | `--threshold` | 0.5 | NG 확률이 이 값 이상이면 NG로 판정 |
 | `--device` | `auto` | 계산 장치 |
 | `--output` | 모델 옆 `{모델명}_wrong_{데이터 폴더명}.csv` | 오분류 CSV 저장 경로 |
@@ -351,7 +355,7 @@ models/side_surface_cnn_101310_wrong_val.csv     ← --data .../B/val 평가 결
 
 | 단계 | 내용 | 파일 |
 |---|---|---|
-| 5단계 | val로 threshold 결정, test 평가, 오분류 CSV, 설정 `.json` 저장 (모델과 같은 이름) | `tools/train_classifier.py` |
+| 5단계 | val로 threshold 결정, test 평가, 오분류 CSV, 설정 `.json` 저장 (모델과 같은 이름) | `tools/train/train_classifier.py` |
 | 6단계 | `load_model()`, `predict()` — 샘플마다 아래 dict 반환 | `side/classifier.py` |
 
 ```python
@@ -372,3 +376,131 @@ models/side_surface_cnn_101310_wrong_val.csv     ← --data .../B/val 평가 결
 | Windows에서 이미지가 `None` | 한글 경로 문제. 경로를 영문으로 바꾸기 |
 | 학습 그래프의 한글이 □로 깨짐 | matplotlib 기본 폰트에 한글 없음. 라벨은 영문 유지 |
 | MPS 결과가 이상함 | `--device cpu`로 비교 |
+
+---
+
+## 8. Object Detection (Faster R-CNN) — 결함 박스 검출
+
+Segmentation과 같은 NG 마스크로 **결함 박스**를 만들어, 박스를 직접 찾는 Faster R-CNN을 A/B 표면 타일로 각각 학습합니다.
+
+```
+원본 TIFF + 10/15 NG 마스크
+   │  ① tools/data/make_od_data.py      app.py와 같은 표면 Crop + 마스크 → 결함 박스
+   ▼
+dataset/infer/side_surface_det_v1/   A/, B/, mask/ PNG 타일 + boxes.csv
+   │  ② tools/train/train_detection.py  --kind A | B
+   ▼
+models/Detector/side_surface_frcnn{A|B}_MMDDHH.pt (+ .png 학습 그래프, .json 설정)
+   │  ③ tools/eval/eval_detection.py    split 또는 원본 TIFF 폴더 평가 (+ 오류 이미지)
+   ▼
+정확도 · TP/FN/FP/TN · 박스 AP/재현율/정밀도 + 오분류 CSV + dataset/errors/Detector/
+```
+
+> Segmentation 데이터 생성 스크립트는 `tools/data/make_sg_data.py`로 이름이 바뀌었습니다 (출력 폴더 `side_surface_od_v1`은 그대로).
+
+### 데이터셋 — `tools/data/make_od_data.py`
+
+```bash
+python tools/data/make_od_data.py --overwrite
+```
+
+- 크롭: `extract_surface_tiles` (검사 프로그램과 같은 표면 타일, 약 33×175). 마스크도 같은 좌표로 자릅니다.
+- 박스: 마스크 결함 픽셀을 5×5 팽창으로 묶고, 묶음마다 원래 결함 픽셀을 감싸는 박스 (4픽셀 미만 제외).
+- split: `make_sg_data.py`와 같음 — NG(10/15 Front·Right)와 OK(10/06 Front·Right) 각 2,000장, seed 7 → **Train 3,000 / Val 500 / Test 500**.
+
+### 모델 — `side/detection.py`
+
+| 구성 | 내용 |
+|---|---|
+| `preprocess(image)` | 그레이스케일 → `(32, 176)` resize → `1 - x/255` 반전 → `(1, 32, 176)` |
+| `build_model()` | Faster R-CNN, backbone **ResNet-18 + FPN** (1채널 입력, 사전학습 없이 처음부터 학습, BN 학습) |
+| 내부 크기 | 모델 안에서 4배(128×704)로 키워 1~2px 높이 결함도 anchor에 걸리게 함 |
+| Anchor | FPN 단계별 12/24/48/96/192px × 세로/가로 비율 0.1·0.25·0.5·1·2 (가로로 긴 사선 결함) |
+| 판정 | 박스 점수 ≥ **0.5**인 박스가 1개 이상이면 NG, 박스 NMS IoU 0.3 |
+
+### 학습 — `tools/train/train_detection.py`
+
+```bash
+python tools/train/train_detection.py --kind A
+python tools/train/train_detection.py --kind B
+```
+
+| 상수 | 값 | 의미 |
+|---|---|---|
+| `BATCH_SIZE` | 32 | |
+| `EPOCHS` / `PATIENCE` | 25 / 5 | val loss 기준 조기 종료 |
+| `LR`, `WEIGHT_DECAY` | 3e-4, 1e-4 | AdamW, gradient clip 10 |
+| 증강 | 좌우 반전 (박스 포함) | |
+
+- 그래프의 Acc는 이미지 단위 OK/NG 정확도입니다 (학습세트는 매 epoch 500장만 뽑아 계산).
+- MPS(맥)에서는 박스 개수가 배치마다 달라 GPU 캐시가 수십 GB까지 커지므로 주기적으로 `torch.mps.empty_cache()`를 호출합니다. 그래도 느려지면 `--device cpu`와 비교하세요.
+- MPS 기준 epoch당 약 4분 (A/B 동시 학습 시 약 8분).
+
+### 평가 — `tools/eval/eval_detection.py`
+
+```bash
+python tools/eval/eval_detection.py --model models/Detector/side_surface_frcnnA_MMDDHH.pt --errors dataset/errors/Detector/FRCNN_A/Test_split
+python tools/eval/eval_detection.py --model models/Detector/side_surface_frcnnA_MMDDHH.pt --tiff dataset/Test_1013 --errors dataset/errors/Detector/FRCNN_A/Test_1013
+python tools/eval/eval_detection.py --model models/Detector/side_surface_frcnnA_MMDDHH.pt --tiff dataset/원본/Side_Demo_1006/back_261006 dataset/원본/Side_Demo_1006/left_261006
+python tools/eval/eval_detection.py --model models/Detector/side_surface_frcnnA_MMDDHH.pt --tiff dataset/원본/Side_Demo_1006/front_261006/NG dataset/원본/Side_Demo_1006/right_261006/NG
+```
+
+| 옵션 | 설명 |
+|---|---|
+| `--model` | `.pt` 파일. 옆의 `.json`에서 A/B 종류를 읽음 |
+| `--data`, `--split` | 데이터셋 split 평가 (정답 박스가 있어 박스 지표도 출력) |
+| `--tiff`, `--views` | 원본 TIFF를 즉석 크롭해 이미지 단위로만 평가 |
+| `--errors DIR` | 오분류 비교 이미지 `{DIR}/{FN,FP}/` + 볼 검사 NG를 뺀 `{FN,FP}_notbal/{origin,crop,result}/` |
+
+- 박스 지표: 점수 ≥ 0.5 박스 기준 **결함 재현율·정밀도**(정답과 IoU ≥ 0.3이면 맞음), 전체 점수로 계산한 **AP@0.3**.
+- 오분류 CSV(`{모델명}_wrong_{평가 이름}.csv`) 컬럼: `error, sample_id, label, pred, max_score, boxes, view, path, source`.
+
+### 결과 (2026-10-21)
+
+| 평가셋 | `side_surface_frcnnA_102113` (A) | `side_surface_frcnnB_102114` (B) |
+|---|---|---|
+| Test split (500장) | 99.6% (FN 2 · FP 0), 박스 AP 0.976 · 재현율 97.2% | 99.6% (FN 2 · FP 0), 박스 AP 0.969 · 재현율 96.5% |
+| Test_1013 (202장) | 78.7% (FN 20 · FP 23) | 85.1% (FN 11 · FP 19) |
+| 10/06 Back·Left (4,000장) | 99.58% (FN 8 · FP 9) | 99.5% (FN 19 · FP 1) |
+| 10/06 Front·Right NG (2,000장) | 99.5% (FN 10) | 99.0% (FN 20) |
+
+- FP는 대부분 표면 상·하단(A)·좌우(B) 크롭 경계의 어두운 띠를 박스로 잡은 것입니다. 그러나 경계 3px 박스를 빼면 10/06 NG의 경계 결함까지 사라져(Front·Right NG 99.5% → 75.4%) 단순 제외는 쓸 수 없습니다.
+- B는 표면 결 오검출이 적은 대신 우측 측면 결손·경계 가는 선 16건을 놓칩니다 (A는 그중 15건 검출).
+- 오류 이미지와 유형: `dataset/errors/Detector/`, `dataset/errors/README.md`, `dataset/errors/summary.csv`.
+
+---
+
+## 9. CNN 분류 — Object Detection·Segmentation과 같은 데이터로 학습
+
+1~5장의 CNN(`SurfaceCNN`)을 그대로 두고, **데이터만** 8장 Object Detection과 같은 `side_surface_det_v1`(10/15 NG + 10/06 OK, Front·Right, 표면 타일)로 바꿔 A/B를 각각 학습했습니다. 마스크·박스는 쓰지 않고 OK/NG 라벨만 씁니다.
+평가셋도 8장과 같아서 세 모델을 그대로 비교할 수 있습니다.
+
+```bash
+python tools/train/train_classifier.py --kind A --data dataset/infer/side_surface_det_v1
+python tools/train/train_classifier.py --kind B --data dataset/infer/side_surface_det_v1
+```
+
+```bash
+python tools/eval/eval_classifier.py --model models/Classifier/side_surface_cnnA_MMDDHH.pt --data dataset/infer/side_surface_det_v1/A/test
+python tools/eval/eval_classifier.py --model models/Classifier/side_surface_cnnA_MMDDHH.pt --tiff dataset/Test_1013
+python tools/eval/eval_classifier.py --model models/Classifier/side_surface_cnnA_MMDDHH.pt --tiff dataset/원본/Side_Demo_1006/back_261006 dataset/원본/Side_Demo_1006/left_261006
+python tools/eval/eval_classifier.py --model models/Classifier/side_surface_cnnA_MMDDHH.pt --tiff dataset/원본/Side_Demo_1006/front_261006/NG dataset/원본/Side_Demo_1006/right_261006/NG
+```
+
+- 학습: Train 3,000 / Val 500 / Test 500, 하이퍼파라미터는 2장과 같음 (batch 64, AdamW 1e-3, 30 epoch, patience 5). MPS 기준 A/B 합쳐 약 2분.
+- `side_surface_cnnA_102211`: best epoch 27 (val loss 0.0050) · `side_surface_cnnB_102211`: best epoch 21 (val loss 0.0055, epoch 26 조기 종료).
+
+### 결과 (2026-10-22, threshold 0.5) — 오류 수 (FN · FP)
+
+| 평가셋 | CNN A `cnnA_102211` | CNN B `cnnB_102211` | Faster R-CNN A / B | U-Net A / B |
+|---|---|---|---|---|
+| Test split (500장) | 99.6% (2 · 0) | 99.6% (2 · 0) | 99.6% (2 · 0) / 99.6% (2 · 0) | 99.2% (4 · 0) / 99.2% (4 · 0) |
+| Test_1013 (202장) | 81.2% (22 · 16) | 81.2% (8 · 30) | 78.7% (20 · 23) / 85.1% (11 · 19) | 89.1% (10 · 12) / 76.2% (2 · 46) |
+| 10/06 Back·Left (4,000장) | 99.2% (32 · 0) | **99.75% (5 · 5)** | 99.58% (8 · 9) / 99.5% (19 · 1) | 99.75% (7 · 3) / 99.6% (8 · 8) |
+| 10/06 Front·Right NG (2,000장) | 97.4% (52) | **99.55% (9)** | 99.5% (10) / 99.0% (20) | 99.45% (11) / 99.5% (10) |
+
+- U-Net은 `side_surface_od_v2`(같은 표면 타일·같은 split)로 학습했고, 숫자는 `models/Segmenter/*_wrong_*.csv`에서 셌습니다.
+- **CNN B는 위치 정보 없이 OK/NG 라벨만으로도 10/06 두 평가셋에서 Faster R-CNN·U-Net과 같거나 더 낫습니다.** 파라미터는 약 6만 개로 Faster R-CNN보다 훨씬 가볍습니다.
+- CNN A는 10/06 NG를 많이 놓칩니다 (FN 32 + 52). A 원본 질감에서는 학습 세션(10/15 NG)과 다른 날의 결함을 덜 일반화하는 것으로 보입니다.
+- Test_1013은 세 모델 모두 Left 방향 오류가 대부분입니다 (학습 데이터에 Left가 없음). CNN B는 FP 30건으로 OK를 NG로 많이 판정하고, CNN A는 FN 22건으로 반대 방향입니다.
+- 오분류 CSV: `models/Classifier/side_surface_cnn{A|B}_102211_wrong_*.csv`.

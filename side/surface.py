@@ -12,9 +12,8 @@ from contour import (
     get_line_quadrilateral,
 )
 from general import to_bgr, to_bgra, to_grayscale
-from PIL import Image, ImageDraw
 
-from .ball import _load_preview_font
+from .ball import PREVIEW_CAPTION_COLOR, _load_preview_font, draw_preview_text
 
 
 ANALYSIS_PREVIEW_MASK_MODE = "contour"
@@ -696,8 +695,12 @@ def crop_polygon_tile(
 PREVIEW_CROP_SCALE = 2
 
 
-def add_preview_caption(preview, caption):
-    """볼 프리뷰처럼 A/B 비교 미리보기 아래에 페이지 이름을 왼쪽 정렬로 붙인다."""
+
+def add_preview_caption(preview, caption, caption_color=PREVIEW_CAPTION_COLOR):
+    """볼 프리뷰처럼 A/B 비교 미리보기 아래에 페이지 이름을 왼쪽 정렬로 붙인다.
+
+    caption_color는 BGR 순서이며, 다크 모드 화면에서는 밝은 색을 넘긴다.
+    """
 
     if preview is None or preview.size == 0:
         return None
@@ -715,24 +718,27 @@ def add_preview_caption(preview, caption):
     if font is None:
         # 한글 폰트가 없으면 OpenCV 기본 글꼴로 영문 이름을 쓴다.
         caption = caption.replace("이미지 ", "Image ")
+        # 배경을 글자색의 투명 픽셀로 채워야 안티앨리어싱 가장자리가 검게 번지지 않는다.
+        labeled[height:] = (*caption_color, 0)
         cv2.putText(labeled, caption, (2, height + 17), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.45, (40, 40, 40, 255), 1, cv2.LINE_AA)
+                    0.45, (*caption_color, 255), 1, cv2.LINE_AA)
         return labeled
-    # OpenCV 기본 글꼴은 한글을 못 그리므로 캡션은 PIL로 그린다(BGRA 순서 유지).
-    band = Image.fromarray(labeled[height:].copy(), "RGBA")
-    ImageDraw.Draw(band).text((2, 3), caption, font=font, fill=(40, 40, 40, 255))
-    labeled[height:] = np.asarray(band)
+    # OpenCV 기본 글꼴은 한글을 못 그리므로 캡션은 PIL로 그린다.
+    draw_preview_text(labeled[height:], (2, 3), caption, font, caption_color)
     return labeled
 
 
-def create_preview_comparison(left_preview, left_caption, right_preview, right_caption):
+def create_preview_comparison(
+    left_preview, left_caption, right_preview, right_caption,
+    caption_color=PREVIEW_CAPTION_COLOR,
+):
     """두 페이지의 같은 기준선 크롭 결과를 위아래로 합친다.
 
     가로로 나란히 두면 납작한 이미지가 프리뷰 폭에 맞춰 작게 줄어들어, 위아래로 쌓는다.
     """
 
-    left = add_preview_caption(left_preview, left_caption)
-    right = add_preview_caption(right_preview, right_caption)
+    left = add_preview_caption(left_preview, left_caption, caption_color)
+    right = add_preview_caption(right_preview, right_caption, caption_color)
     if left is None:
         return right
     if right is None:

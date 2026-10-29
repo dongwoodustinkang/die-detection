@@ -10,14 +10,14 @@ import cv2
 import numpy as np
 import torch
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from side.segmenter import SurfaceUNet, pick_device, preprocess
-from tools.make_data import collect_tiffs, display_path, parse_label_and_view
-from tools import make_od_data, make_sg_data
-from tools.make_sg_data import MERGE_KERNEL, MIN_BOX_PIXELS, Sample
-from tools.train_segmenter import DEFAULT_DATA, MIN_DEFECT_PIXELS, PIXEL_THRESHOLD, load_split
+from tools.data.make_data import collect_tiffs, display_path, parse_label_and_view
+from tools.data import make_od_data, make_sg_data
+from tools.data.make_sg_data import MERGE_KERNEL, MIN_BOX_PIXELS, Sample
+from tools.train.train_segmenter import DEFAULT_DATA, MIN_DEFECT_PIXELS, PIXEL_THRESHOLD, load_split
 
 VIEWS = ("Back", "Front", "Left", "Right")
 WRONG_FIELDS = ("error", "sample_id", "label", "pred", "defect_pixels", "max_prob", "view", "path")

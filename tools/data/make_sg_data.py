@@ -13,12 +13,12 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from general import load_ab_tiff_pages, to_grayscale # 이미지 불러오기
 from side import SURFACE_CROP_VERSION, extract_surface_tiles # 표면 위치 찾기
-from tools.make_data import (
+from tools.data.make_data import (
     LABELS, SPLITS, check_output, display_path, parse_label_and_view,
     ratios_to_counts, write_csv, write_png,
 )
@@ -272,8 +272,8 @@ def summarize(args, samples, failures, renamed_masks):
 
 HELP_EPILOG = f"""\
 사용 예:
-  python tools/make_sg_data.py                   기본 설정으로 생성
-  python tools/make_sg_data.py --overwrite       기존 결과를 지우고 다시 생성
+  python tools/data/make_sg_data.py                   기본 설정으로 생성
+  python tools/data/make_sg_data.py --overwrite       기존 결과를 지우고 다시 생성
 
 출력 구조:
   <output>/A/<split>/<OK|NG>/<sample_id>.png     A 그레이스케일 {CROP_HEIGHT}×{CROP_WIDTH}
@@ -288,7 +288,7 @@ HELP_EPILOG = f"""\
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="python tools/make_sg_data.py",
+        prog="python tools/data/make_sg_data.py",
         description=__doc__.splitlines()[0],
         epilog=HELP_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,

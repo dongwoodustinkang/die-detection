@@ -33,6 +33,7 @@ from .ball import (
 )
 from .surface import (
     CONTOUR_COLOR,
+    PREVIEW_CAPTION_COLOR,
     SOURCE_PREVIEW_MASK_MODE,
     apply_side_cutting_mask,
     create_polygon_preview,
@@ -410,7 +411,7 @@ def _fit_slot_ranges_to_page_a(result, pillar):
     )
 
 
-def _create_pillar_preview(image_b, result, pillar):
+def _create_pillar_preview(image_b, result, pillar, caption_color=PREVIEW_CAPTION_COLOR):
     """기둥(상면)·빈도(하면) 기준의 A/B Crop 비교 이미지를 만든다."""
     if pillar.page_a_contour is not None:
         # A 밴드 컨투어(상·하단 기준선 + 좌·우 컨투어 외곽) 그대로 자른 학습·추론용 타일을 보여준다.
@@ -420,6 +421,7 @@ def _create_pillar_preview(image_b, result, pillar):
             "이미지 A",
             tiles.tile_b if tiles else None,
             "이미지 B",
+            caption_color,
         )
     a_preview = create_polygon_preview(
         pillar.source_preview_image,
@@ -442,7 +444,7 @@ def _create_pillar_preview(image_b, result, pillar):
         right_reference_line=pillar.right_reference_line,
     )
     return create_preview_comparison(
-        a_preview, "이미지 A", b_preview, "이미지 B"
+        a_preview, "이미지 A", b_preview, "이미지 B", caption_color
     )
 
 
@@ -481,7 +483,7 @@ def extract_surface_tiles(image_a, image_b):
     return create_surface_tiles(image_a, image_b, pillar.page_a_contour)
 
 
-def run_side_detection(image_path, ball_slot_count=3):
+def run_side_detection(image_path, ball_slot_count=3, caption_color=PREVIEW_CAPTION_COLOR):
     image_a, image_b = load_ab_tiff_pages(image_path) # 이미지 불러오기
 
     gray, result, cuts, pillar = _analyze_surface(image_a, image_b, image_path)
@@ -533,12 +535,13 @@ def run_side_detection(image_path, ball_slot_count=3):
     result.ball_roi_preview = create_slot_ball_preview(
         image_a, result.ball_slot_measurements,
         len(get_surface_slot_boundaries(result.ball_slot_ranges)) - 1,
+        caption_color,
     )
 
 
     started_at = perf_counter() # 알고리즘 소요 시간 계산(ms)
     result.surface_tiles = create_surface_tiles(image_a, image_b, pillar.page_a_contour)
-    result.analysis_preview = _create_pillar_preview(image_b, result, pillar)
+    result.analysis_preview = _create_pillar_preview(image_b, result, pillar, caption_color)
 
     # 표면 분석 소요 시간 합산
     # 상단 + 하면 + 크롭 미리보기 이미지 합성 시간 

@@ -14,7 +14,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from general import load_ab_tiff_pages # 이미지 불러오기
@@ -270,11 +270,11 @@ def summarize(args, files, cropped, used, failures, counts_by_label):
 
 HELP_EPILOG = """\
 사용 예:
-  python tools/make_data.py                      기본 설정으로 생성
-  python tools/make_data.py --overwrite          기존 결과를 지우고 다시 생성
-  python tools/make_data.py dataset/원본/A dataset/원본/B --output dataset/side_surface_v2
-  python tools/make_data.py --train 0.6 --val 0.2 --test 0.2 --seed 7 --overwrite
-  python tools/make_data.py dataset/원본/새데이터 --output dataset/새데이터_test --train 0 --val 0 --test 1.0
+  python tools/data/make_data.py                      기본 설정으로 생성
+  python tools/data/make_data.py --overwrite          기존 결과를 지우고 다시 생성
+  python tools/data/make_data.py dataset/원본/A dataset/원본/B --output dataset/side_surface_v2
+  python tools/data/make_data.py --train 0.6 --val 0.2 --test 0.2 --seed 7 --overwrite
+  python tools/data/make_data.py dataset/원본/새데이터 --output dataset/새데이터_test --train 0 --val 0 --test 1.0
                                                  전부 test로 (테스트만 할 경우)
 
 출력 구조:
@@ -288,7 +288,7 @@ HELP_EPILOG = """\
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="python tools/make_data.py",
+        prog="python tools/data/make_data.py",
         description=__doc__.splitlines()[0],
         epilog=HELP_EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,

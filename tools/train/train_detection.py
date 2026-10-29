@@ -13,15 +13,15 @@ import numpy as np
 import torch
 import torch.nn as nn
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from side.detection import (
     INPUT_W, NMS_IOU, SCORE_THRESHOLD, build_model, pick_device, predict, preprocess, scale_boxes,
 )
-from tools.make_data import display_path
-from tools.train_classifier import next_model_stem
-from tools.train_graphs import save_history_plot
+from tools.data.make_data import display_path
+from tools.train.train_classifier import next_model_stem
+from tools.train.train_graphs import save_history_plot
 
 DEFAULT_DATA = ROOT / "dataset" / "infer" / "side_surface_det_v1" # make_od_data.py 출력
 LABELS = ("OK", "NG")

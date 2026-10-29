@@ -10,11 +10,11 @@ import json
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from tools.eval_detection import ball_is_ng
-from tools.make_data import collect_tiffs, display_path, parse_label_and_view, write_csv
+from tools.eval.eval_detection import ball_is_ng
+from tools.data.make_data import collect_tiffs, display_path, parse_label_and_view, write_csv
 
 DEFAULT_OUTPUT = ROOT / "models" / "eval_summary.csv"
 BALL_CACHE = ROOT / "models" / "ball_status.csv"  # 볼 검사는 모델과 무관하므로 원본 TIFF별로 한 번만 계산

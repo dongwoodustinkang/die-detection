@@ -69,6 +69,8 @@ PREVIEW_FONT_CANDIDATES = (
     "C:/Windows/Fonts/malgun.ttf",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
 )
+# 프리뷰 캡션·라벨의 기본 글자색(BGR)이다. 다크 모드 화면에서는 밝은 색을 넘긴다.
+PREVIEW_CAPTION_COLOR = (40, 40, 40)
 
 
 def _contour_line_mask(
@@ -674,19 +676,35 @@ PREVIEW_LABEL_WIDTH = 120
 PREVIEW_LABEL_HEIGHT = 20
 
 
+def draw_preview_text(bgra, position, text, font, color):
+    """투명 배경 BGRA 이미지에 PIL 글꼴로 글자를 그린다. color는 BGR 순서다.
+
+    완전 투명(검정) 위에 바로 그리면 글자 가장자리가 검게 번지므로,
+    글자색의 투명 픽셀로 채운 레이어에 그린 뒤 합성한다.
+    """
+    rgb = tuple(color[::-1])
+    layer = Image.new("RGBA", (bgra.shape[1], bgra.shape[0]), (*rgb, 0))
+    ImageDraw.Draw(layer).text(position, text, font=font, fill=(*rgb, 255))
+    base = Image.fromarray(np.ascontiguousarray(bgra[:, :, [2, 1, 0, 3]]), "RGBA")
+    bgra[:] = np.asarray(Image.alpha_composite(base, layer))[:, :, [2, 1, 0, 3]]
+
+
 @lru_cache(maxsize=512)
 def _render_preview_label(text, color):
-    """라벨 한 줄을 BGR 이미지로 그린다. 같은 문구는 다시 그리지 않고 재사용한다."""
+    """라벨 한 줄을 투명 배경 BGRA 이미지로 그린다. color는 RGB 순서이며,
+    같은 문구는 다시 그리지 않고 재사용한다."""
     font = _load_preview_font(14)
+    bgr = tuple(color[::-1])
+    label = np.zeros((PREVIEW_LABEL_HEIGHT, PREVIEW_LABEL_WIDTH, 4), dtype=np.uint8)
     if font is None:
-        label = np.full((PREVIEW_LABEL_HEIGHT, PREVIEW_LABEL_WIDTH, 3), 255, dtype=np.uint8)
+        # 배경을 글자색의 투명 픽셀로 채워야 안티앨리어싱 가장자리가 검게 번지지 않는다.
+        label[:] = (*bgr, 0)
         cv2.putText(label, text.replace("·", "/"), (6, 14), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.4, color[::-1], 1, cv2.LINE_AA)
+                    0.4, (*bgr, 255), 1, cv2.LINE_AA)
         return label
     # OpenCV 기본 글꼴은 한글을 못 그리므로 라벨은 PIL로 그린다.
-    label = Image.new("RGB", (PREVIEW_LABEL_WIDTH, PREVIEW_LABEL_HEIGHT), (255, 255, 255))
-    ImageDraw.Draw(label).text((6, 2), text, font=font, fill=color)
-    return np.asarray(label)[:, :, ::-1].copy()
+    draw_preview_text(label, (6, 2), text, font, bgr)
+    return label
 
 
 # 슬롯 수별 위치 이름(한글, 한글 폰트가 없을 때 쓰는 영문)이다.
@@ -704,24 +722,28 @@ def get_slot_position_name(slot_index, slot_count, korean=True):
     return names[slot_index][0 if korean else 1]
 
 
-def create_slot_ball_preview(image, measurements, slot_count):
-    """슬롯 순서대로 볼 ROI 크롭과 '위치 (W X H)', 판정을 표시한다."""
+def create_slot_ball_preview(image, measurements, slot_count, caption_color=PREVIEW_CAPTION_COLOR):
+    """슬롯 순서대로 볼 ROI 크롭과 '위치 (W X H)', 판정을 표시한다.
+
+    크롭 칸만 불투명하고 라벨·칸 사이는 투명한 BGRA 이미지를 돌려준다.
+    """
     if not measurements:
         return None
     source = _as_color_image(image)
     image_height, image_width = source.shape[:2]
     scale, box_size, gap = 3, PREVIEW_LABEL_WIDTH, 8
     label_top = box_size + 2
-    output = np.full(
+    output = np.zeros(
         (label_top + 2 * PREVIEW_LABEL_HEIGHT + 4,
-         len(measurements) * box_size + gap * (len(measurements) - 1), 3),
-        255, dtype=np.uint8,
+         len(measurements) * box_size + gap * (len(measurements) - 1), 4),
+        dtype=np.uint8,
     )
     korean = _load_preview_font(14) is not None
     for index, (slot_index, ball_width, ball_height, box, status) in enumerate(measurements):
         abnormal = status != BALL_STATUS_OK
         border = (65, 65, 220) if abnormal else ROI_COLOR
         tile = output[:, index * (box_size + gap):index * (box_size + gap) + box_size]
+        tile[:box_size] = (255, 255, 255, 255)
         if box is not None:
             left, top, right, bottom = pad_ball_roi(box, source.shape)
             crop = source[max(0, top):min(image_height, bottom + 1),
@@ -732,15 +754,15 @@ def create_slot_ball_preview(image, measurements, slot_count):
                 interpolation=cv2.INTER_NEAREST,
             )
             y0, x0 = (box_size - crop.shape[0]) // 2, (box_size - crop.shape[1]) // 2
-            tile[y0:y0 + crop.shape[0], x0:x0 + crop.shape[1]] = crop
+            tile[y0:y0 + crop.shape[0], x0:x0 + crop.shape[1], :3] = crop
         else:
-            tile[:box_size] = 235
-        cv2.rectangle(tile, (0, 0), (box_size - 1, box_size - 1), border, 1)
+            tile[:box_size] = (235, 235, 235, 255)
+        cv2.rectangle(tile, (0, 0), (box_size - 1, box_size - 1), (*border, 255), 1)
         title = get_slot_position_name(slot_index, slot_count, korean)
         if box is not None:
             title = f"{title} ({ball_width} X {ball_height})"
         tile[label_top:label_top + PREVIEW_LABEL_HEIGHT] = _render_preview_label(
-            title, (40, 40, 40)
+            title, tuple(caption_color[::-1])
         )
         tile[label_top + PREVIEW_LABEL_HEIGHT:label_top + 2 * PREVIEW_LABEL_HEIGHT] = (
             _render_preview_label(

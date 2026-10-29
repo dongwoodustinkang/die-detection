@@ -1,7 +1,10 @@
 """검사 화면에서 재사용하는 이미지·모달 구성요소."""
 
-from PyQt5.QtCore import QPoint, Qt, pyqtSignal
-from PyQt5.QtGui import QPixmap
+from pathlib import Path
+
+from PyQt5.QtCore import QByteArray, QPoint, QPointF, QRectF, QSize, Qt, pyqtSignal
+from PyQt5.QtGui import QIcon, QPainter, QPixmap
+from PyQt5.QtSvg import QSvgRenderer
 from PyQt5.QtWidgets import (
     QDialog,
     QFrame,
@@ -14,6 +17,49 @@ from PyQt5.QtWidgets import (
     QToolTip,
     QVBoxLayout,
 )
+
+from styles import ICON_COLORS
+
+
+ICON_DIR = Path(__file__).resolve().parent / "assets"
+
+
+def button_icon_colors(theme):
+    """이동 버튼의 글자색(styles.py)과 같은 상태별 아이콘 색"""
+    colors = ICON_COLORS[theme]
+    return {QIcon.Normal: colors["normal"], QIcon.Disabled: colors["disabled"]}
+
+
+def svg_icon(name, size, colors):
+    """색이 지정되지 않은 SVG를 버튼 상태별 색으로 칠해 레티나용 2배 크기까지 만든다."""
+    source = (ICON_DIR / f"{name}.svg").read_bytes()
+    icon = QIcon()
+    for mode, color in colors.items():
+        tinted = source.replace(b"<svg ", f'<svg fill="{color}" '.encode(), 1)
+        renderer = QSvgRenderer(QByteArray(tinted))
+        for scale in (1, 2):
+            pixmap = QPixmap(size * scale, size * scale)
+            pixmap.fill(Qt.transparent)
+            # down.svg(448×512)처럼 정사각형이 아닌 아이콘도 비율을 지켜 가운데에 그린다.
+            fit = renderer.viewBoxF().size().scaled(size * scale, size * scale, Qt.KeepAspectRatio)
+            target = QRectF(QPointF(), fit)
+            target.moveCenter(QPointF(pixmap.width() / 2, pixmap.height() / 2))
+            painter = QPainter(pixmap)
+            renderer.render(painter, target)
+            painter.end()
+            icon.addPixmap(pixmap, mode)
+    return icon
+
+
+def create_modal_close_button(parent):
+    """모달 오른쪽 위의 닫기(quit) 아이콘 버튼을 부모 창의 테마 색으로 만든다."""
+    theme = getattr(parent, "theme", "light")
+    close_button = QPushButton()
+    close_button.setObjectName("modalCloseButton")
+    close_button.setToolTip("닫기")
+    close_button.setIcon(svg_icon("quit", 14, {QIcon.Normal: ICON_COLORS[theme]["close"]}))
+    close_button.setIconSize(QSize(14, 14))
+    return close_button
 
 
 def show_pixel_tooltip(label, source_pixmap, position):
@@ -234,9 +280,7 @@ class InspectionInfoModal(QDialog):
         header = QHBoxLayout()
         title = QLabel("검사 상세 정보")
         title.setObjectName("imageModalTitle")
-        close_button = QPushButton("×")
-        close_button.setObjectName("modalCloseButton")
-        close_button.setToolTip("닫기")
+        close_button = create_modal_close_button(parent)
         close_button.clicked.connect(self.accept)
         header.addWidget(title)
         header.addStretch()
@@ -291,9 +335,7 @@ class NoteModal(QDialog):
         header = QHBoxLayout()
         title = QLabel("메모 수정" if self.existing_note else "메모 추가")
         title.setObjectName("imageModalTitle")
-        close_button = QPushButton("×")
-        close_button.setObjectName("modalCloseButton")
-        close_button.setToolTip("닫기")
+        close_button = create_modal_close_button(parent)
         close_button.clicked.connect(self.reject)
         header.addWidget(title)
         header.addStretch()

@@ -12,16 +12,16 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw, ImageFont
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from side import run_side_detection
 from side.ball import BALL_STATUS_OK
 from side.detection import SCORE_THRESHOLD, load_model, predict, preprocess, scale_boxes
-from tools.make_data import collect_tiffs, display_path, parse_label_and_view, write_png
-from tools.make_od_data import crop_sample
-from tools.make_sg_data import Sample
-from tools.train_detection import DEFAULT_DATA, load_split
+from tools.data.make_data import collect_tiffs, display_path, parse_label_and_view, write_png
+from tools.data.make_od_data import crop_sample
+from tools.data.make_sg_data import Sample
+from tools.train.train_detection import DEFAULT_DATA, load_split
 
 VIEWS = ("Back", "Front", "Left", "Right")
 MATCH_IOU = 0.3 # 박스 재현율·정밀도에서 정답과 맞았다고 보는 IoU (가는 사선은 IoU가 낮게 나와 0.5보다 느슨하게)

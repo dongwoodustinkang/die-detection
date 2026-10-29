@@ -3,8 +3,8 @@ from datetime import datetime
 from pathlib import Path
 from time import perf_counter
 
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QColor, QImage, QPixmap
+from PyQt5.QtCore import QSize, Qt, QTimer
+from PyQt5.QtGui import QColor, QIcon, QImage, QKeySequence, QPixmap
 from PyQt5.QtWidgets import (
     QButtonGroup,
     QDialog,
@@ -18,6 +18,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QShortcut,
     QSizePolicy,
     QToolButton,
     QVBoxLayout,
@@ -30,16 +31,18 @@ from bottom.circles import (
     MIN_CIRCLE_AREA_RATIO, MIN_CIRCLE_ASPECT_RATIO, ROI_SIDE_RATIO,
 )
 from contour import get_primary_contact_reference_point
-from general import NotesRepository, next_capture_path, to_bgr
+from general import NotesRepository, label_from_filename, next_capture_path, to_bgr
 from side.ball import get_slot_position_name, get_surface_slot_boundaries
 from side.pipeline import run_side_detection
-from styles import APP_STYLESHEET
+from styles import ICON_COLORS, PREVIEW_CAPTION_COLORS, STYLESHEETS
 from ui_components import (
     ClickableImageLabel,
     ImageModal,
     InspectionInfoModal,
     NoteModal,
-    show_pixel_tooltip, 
+    button_icon_colors,
+    show_pixel_tooltip,
+    svg_icon,
 )
 
 
@@ -60,8 +63,10 @@ ALGORITHM_OPTIONS = {
 class MainWindow(QMainWindow):
     """A/B TIFF의 모드별 검출 결과를 확인하는 메인 창."""
 
-    def __init__(self):
+    def __init__(self, theme="light"):
         super().__init__()
+        # "light" 또는 "dark" (app.py의 --dark 옵션)
+        self.theme = theme
         self.setWindowTitle("Semiconductor Image Detection Program")
         self.resize(2120, 880)
         self.setMinimumSize(1200, 720)
@@ -86,14 +91,20 @@ class MainWindow(QMainWindow):
         self.notes_repository = NotesRepository(NOTES_CSV_PATH)
         self.capture_session_dir = None
         self.active_algorithm = "side"
-        self.capture_btn = QPushButton("📸")
+        self.capture_btn = QPushButton()
+        self.capture_btn.setIcon(svg_icon("camera", 18, button_icon_colors(self.theme)))
+        self.capture_btn.setIconSize(QSize(18, 18))
         self.capture_btn.setObjectName("captureIconButton")
         self.capture_btn.setToolTip("현재 화면 캡처 저장")
         self.capture_btn.clicked.connect(self.on_capture)
         self._build_ui()
+        # 버튼 등에 포커스가 있어도 방향키가 먼저 쓰이지 않도록 창 단위 단축키로 이미지를 넘긴다.
+        # 메모 같은 모달 창이 떠 있을 때는 동작하지 않는다.
+        QShortcut(QKeySequence(Qt.Key_Left), self, self.show_prev)
+        QShortcut(QKeySequence(Qt.Key_Right), self, self.show_next)
 
     def _build_ui(self):
-        self.setStyleSheet(APP_STYLESHEET)
+        self.setStyleSheet(STYLESHEETS[self.theme])
 
         central = QWidget()
         central.setObjectName("centralWidget")
@@ -181,6 +192,7 @@ class MainWindow(QMainWindow):
         self.ball_crop_preview_label.setText("조건을 만족하는 볼이 탐지되면 정사각형 내부가 표시됩니다.")
         self.inspection_info_text = "이미지를 불러오면 상세 정보가 표시됩니다."
         self.file_context_label.setText("Filename · 선택된 TIFF 이미지 없음")
+        self._set_file_label(None)
         self.header_metadata_label.setText(f"{algorithm_label} 알고리즘 · TIFF 이미지를 불러오세요.")
         self.prev_btn.setEnabled(False)
         self.note_btn.setEnabled(False)
@@ -231,6 +243,16 @@ class MainWindow(QMainWindow):
         self.algorithm_button.setObjectName("algorithmButton")
         self.algorithm_button.setCursor(Qt.PointingHandCursor)
         self.algorithm_button.setPopupMode(QToolButton.InstantPopup)
+        # down.svg를 글자 오른쪽에 두고, 마우스를 올리면 글자처럼 파란색이 되게 한다.
+        title_colors = ICON_COLORS[self.theme]
+        self.algorithm_button.setIcon(svg_icon(
+            "down", 16, {QIcon.Normal: title_colors["title"], QIcon.Active: title_colors["accent"]}
+        ))
+        self.algorithm_button.setIconSize(QSize(16, 16))
+        self.algorithm_button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.algorithm_button.setLayoutDirection(Qt.RightToLeft)
+        # autoRaise일 때만 마우스를 올린 상태에서 Active 아이콘을 쓴다.
+        self.algorithm_button.setAutoRaise(True)
         algorithm_menu = QMenu(self.algorithm_button)
         for algorithm_key, option in ALGORITHM_OPTIONS.items():
             action = algorithm_menu.addAction(f"{option['label']} Detection")
@@ -275,8 +297,21 @@ class MainWindow(QMainWindow):
         action_layout.addWidget(self.import_btn)
         action_layout.addWidget(self.detect_btn)
         header.addWidget(action_group)
+        self.file_label_badge = QLabel()
+        self.file_label_badge.setObjectName("fileLabelBadge")
+        self.file_label_badge.setToolTip("파일명 기준 라벨 · OK 정상 / NG 불량 / DK 알 수 없음")
+        self._set_file_label(None)
+        header.addWidget(self.file_label_badge)
 
         return header
+
+    def _set_file_label(self, label):
+        """OK/NG/DK 라벨을 표시하고, 이미지가 없으면 빈 상태로 둔다."""
+        self.file_label_badge.setText(label or "—")
+        # styles.py의 QLabel#fileLabelBadge[label="..."] 색을 다시 적용한다.
+        self.file_label_badge.setProperty("label", (label or "none").lower())
+        self.file_label_badge.style().unpolish(self.file_label_badge)
+        self.file_label_badge.style().polish(self.file_label_badge)
 
     def _create_floating_navigation(self):
         """Keep image navigation close at hand without permanently occupying workspace."""
@@ -287,15 +322,22 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
-        self.prev_btn = QPushButton("‹")
+        self.prev_btn = QPushButton()
         self.prev_btn.setObjectName("floatingNavigationButton")
         self.prev_btn.setToolTip("이전 이미지 (←)")
-        self.note_btn = QPushButton("🗒️")
+        self.note_btn = QPushButton()
         self.note_btn.setObjectName("floatingNavigationButton")
         self.note_btn.setToolTip("현재 이미지에 메모 추가")
-        self.next_btn = QPushButton("›")
+        self.next_btn = QPushButton()
         self.next_btn.setObjectName("floatingNavigationButton")
         self.next_btn.setToolTip("다음 이미지 (→)")
+        for button, icon_name, icon_size in (
+            (self.prev_btn, "left", 24),
+            (self.note_btn, "note", 18),
+            (self.next_btn, "right", 24),
+        ):
+            button.setIcon(svg_icon(icon_name, icon_size, button_icon_colors(self.theme)))
+            button.setIconSize(QSize(icon_size, icon_size))
         self.index_label = QLabel("0/00")
         self.index_label.setObjectName("floatingIndexLabel")
         self.prev_btn.clicked.connect(self.show_prev)
@@ -698,7 +740,8 @@ class MainWindow(QMainWindow):
         self.original_pixmap = QPixmap(str(path))
         self._set_scaled_pixmap(self.image_label, self.original_pixmap)
         self.file_context_label.setText(f"{path.parent.name}  /  {path.name}")
-        position = f"{self.current_index + 1} / {len(self.image_paths)}"
+        self._set_file_label(label_from_filename(path))
+        position =f"{self.current_index + 1} / {len(self.image_paths)}"
         self.index_label.setText(position.replace(" / ", "/"))
         # 숫자 자릿수가 바뀌어도 잘리지 않도록 이동 버튼 묶음 크기를 다시 맞춘다.
         self._position_floating_navigation()
@@ -725,7 +768,8 @@ class MainWindow(QMainWindow):
                 self._show_bottom_result(path, result, perf_counter() - started_at)
                 return
             result_image, result = run_side_detection(
-                path, ball_slot_count=self.current_ball_slot_count
+                path, ball_slot_count=self.current_ball_slot_count,
+                caption_color=PREVIEW_CAPTION_COLORS[self.theme],
             )
         except ValueError as error:
             if self.active_algorithm == "bottom":
@@ -1076,9 +1120,5 @@ class MainWindow(QMainWindow):
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Escape:
             self.close()
-        elif event.key() == Qt.Key_Left:
-            self.show_prev()
-        elif event.key() == Qt.Key_Right:
-            self.show_next()
         else:
             super().keyPressEvent(event)

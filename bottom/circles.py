@@ -6,10 +6,9 @@ from typing import List, Optional, Tuple
 import cv2
 import numpy as np
 
-from PIL import Image, ImageDraw
 
 from general import to_bgr
-from side.ball import _load_preview_font
+from side.ball import _load_preview_font, draw_preview_text
 
 
 ROI_SIZE = 40.0
@@ -210,12 +209,15 @@ def draw_circle_regions(image, regions):
 
 
 def create_circle_roi_preview(image_a, regions):
-    """폭을 활용한 3열 × 2행 상세 보기로 여섯 ROI와 실제 윤곽을 확대한다."""
+    """폭을 활용한 3열 × 2행 상세 보기로 여섯 ROI와 실제 윤곽을 확대한다.
+
+    ROI 타일만 불투명하고 캡션·여백은 투명한 BGRA 이미지를 돌려준다.
+    """
     if not regions:
         return None
     # 타일 아래 캡션 두 줄(약 36px)이 다음 행·아래 끝에 붙지 않도록 셀 높이에 여유를 둔다.
     tile_size, cell_width, cell_height = 128, 152, 192
-    preview = np.full((cell_height * 2, cell_width * 3, 3), 245, dtype=np.uint8)
+    preview = np.zeros((cell_height * 2, cell_width * 3, 4), dtype=np.uint8)
     target = np.asarray(((0, 0), (tile_size, 0), (tile_size, tile_size), (0, tile_size)), np.float32)
     source = to_bgr(image_a)
     captions = []
@@ -230,9 +232,11 @@ def create_circle_roi_preview(image_a, regions):
         cv2.rectangle(tile, (0, 0), (tile_size - 1, tile_size - 1), color, 2)
         x = ((region.index - 1) % 3) * cell_width + 12
         y = ((region.index - 1) // 3) * cell_height + 8
-        preview[y:y + tile_size, x:x + tile_size] = tile
+        preview[y:y + tile_size, x:x + tile_size, :3] = tile
+        preview[y:y + tile_size, x:x + tile_size, 3] = 255
         captions.append((x, y + tile_size + 4, _region_captions(region), color))
-    return _draw_region_captions(preview, captions)
+    _draw_region_captions(preview, captions, cell_width - 12)
+    return preview
 
 
 def _region_captions(region):
@@ -249,20 +253,23 @@ def _region_captions(region):
     )
 
 
-def _draw_region_captions(preview, captions):
-    """OpenCV 기본 글꼴은 한글을 못 그리므로 캡션은 PIL로 한 번에 그린다."""
+def _draw_region_captions(preview, captions, caption_width):
+    """투명 배경 BGRA 프리뷰의 ROI 아래에 캡션을 그린다.
+
+    OpenCV 기본 글꼴은 한글을 못 그리므로 한글 폰트가 있으면 PIL로 그린다.
+    """
     font = _load_preview_font(13)
-    if font is None:
-        for x, y, lines, color in captions:
-            for line, text in enumerate(lines):
-                text = (text.replace("원형도", "C").replace("면적", "A")
-                        .replace(" (이상)", " (NG)").replace("²", "2"))
-                cv2.putText(preview, text, (x, y + 14 + line * 18),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.40, color, 1, cv2.LINE_AA)
-        return preview
-    image = Image.fromarray(preview[:, :, ::-1])
-    draw = ImageDraw.Draw(image)
     for x, y, lines, color in captions:
+        # 캡션마다 글자색이 달라서 캡션 영역별로 따로 그린다.
+        area = preview[y:y + 2 * 18 + 4, x:x + caption_width]
+        if font is not None:
+            for line, text in enumerate(lines):
+                draw_preview_text(area, (0, line * 18), text, font, color)
+            continue
+        # 배경을 글자색의 투명 픽셀로 채워야 안티앨리어싱 가장자리가 검게 번지지 않는다.
+        area[:] = (*color, 0)
         for line, text in enumerate(lines):
-            draw.text((x, y + line * 18), text, font=font, fill=color[::-1])
-    return np.asarray(image)[:, :, ::-1].copy()
+            text = (text.replace("원형도", "C").replace("면적", "A")
+                    .replace(" (이상)", " (NG)").replace("²", "2"))
+            cv2.putText(area, text, (0, 14 + line * 18),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.40, (*color, 255), 1, cv2.LINE_AA)

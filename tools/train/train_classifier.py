@@ -11,12 +11,12 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from side.classifier import SurfaceCNN, pick_device, preprocess
-from tools.make_data import display_path
-from tools.train_graphs import save_history_plot
+from tools.data.make_data import display_path
+from tools.train.train_graphs import save_history_plot
 
 DEFAULT_DATA = ROOT / "dataset" / "infer" / "side_surface_v1" # 데이터셋 폴더 경로
 BATCH_SIZE = 64

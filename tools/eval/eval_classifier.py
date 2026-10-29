@@ -9,14 +9,14 @@ from pathlib import Path
 import numpy as np
 import torch
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from side.classifier import SurfaceCNN, pick_device, preprocess
-from tools.make_data import collect_tiffs, parse_label_and_view
-from tools.make_od_data import crop_sample
-from tools.make_sg_data import Sample
-from tools.train_classifier import DEFAULT_DATA, load_folder, load_split
+from tools.data.make_data import collect_tiffs, parse_label_and_view
+from tools.data.make_od_data import crop_sample
+from tools.data.make_sg_data import Sample
+from tools.train.train_classifier import DEFAULT_DATA, load_folder, load_split
 
 VIEWS = ("Back", "Front", "Left", "Right")
 WRONG_FIELDS = ("error", "sample_id", "label", "pred", "cnn_prob", "threshold", "view", "path")

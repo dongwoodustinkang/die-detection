@@ -8,3 +8,7 @@ __pycache__/
 .DS_Store
 
 dataset/
+models/
+captures/
+notes.csv
+slides/

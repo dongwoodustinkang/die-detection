@@ -75,6 +75,15 @@ def next_capture_path(capture_dir, source_path):
     return capture_dir / f"{filename}_{max(sequence_numbers, default=0) + 1}.jpg"
 
 
+def label_from_filename(path):
+    """파일명에 NG가 있으면 NG(불량), OK가 있으면 OK(정상), 둘 다 없으면 DK(모름)."""
+    if "NG" in path.name:
+        return "NG"
+    if "OK" in path.name:
+        return "OK"
+    return "DK"
+
+
 class NotesRepository:
     """CSV에 파일별 메모를 조회하고 갱신한다."""
 

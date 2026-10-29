@@ -2,93 +2,135 @@
 
 [English](README.md) | [한국어](README_KO.md)
 
-> An OpenCV-based program designed to rapidly detect defects on the top, bottom, left, and right surfaces of semiconductor dies.
+> An OpenCV-based program for rapidly detecting defects on the top, bottom, left, and right surfaces of semiconductor dies.
 
-<img src="assets/thumnail.png" width=1280>
+<img src="assets/thumnail.gif" width=1280>
 
 ## Background
-
-This project combines rule-based computer vision with AI instead of relying exclusively on an object-detection AI model throughout the inspection process. The goal is to reduce the computational burden of high-resolution image processing while improving inspection speed, accuracy, decision traceability, and maintainability. This approach also aligns with human-in-the-loop, high-speed inspection and precision-review, and layered rule–AI workflows publicly presented by semiconductor manufacturers and inspection-equipment providers.
+Rather than applying an object-detection AI model on its own across the entire inspection process, this research combines rule-based computer vision with several vision models. This reduces the computational burden of high-resolution image processing and secures inspection speed and accuracy as well as traceability of decisions and maintainability. The approach also matches the human-in-the-loop, high-speed inspection with precision review, and layered rule–AI practices that semiconductor manufacturers and inspection-equipment vendors have recently presented.
 
 ## Current Features
 
-#### Side Inspection
+### Side Inspection
 
-Side inspection checks the die surface and shoulder balls (shoulder bumps) for damage. The process first converts the B page to grayscale, applies thresholding, and extracts the surface contour.
+Side inspection checks **the die surface and shoulder balls (shoulder bumps)** for damage.
+First, the B page is converted to grayscale and thresholded to extract the surface contour.
 
-1. Surface inspection
+#### Surface Inspection
    - Measures the first contact points from the top, bottom, left, and right edges.
-   - Selects the top and bottom cutting lines from the contact-point frequency and density distribution, helping compensate for slight rotation or uneven contour geometry.
-   - Calculates a separate pillar-based reference from the A page and applies both reference methods to identical coordinates on the A/B pages for crop comparison.
+   - Selects the top and bottom cutting lines from the frequency and density distribution of the contact points, compensating for slight rotation or uneven contour shapes on the side.
+   - Calculates a separate pillar reference on the A page, then applies both reference methods to identical coordinates on the A/B pages and compares the crops.
 
-2. Shoulder-ball inspection
+#### Shoulder-Ball Inspection
 
-   The current experimental workflow (updated September 30, 2026) runs in the following order. Slot geometry, brightness scans, representative points, contour extraction, ROIs, and ROI previews are implemented in `side/ball.py`; `side/pipeline.py` assembles the results, and `ui.py` displays them.
+   2-1. `find_downward_contour_white_points`
+      - Starting from the bottom-surface coordinates obtained on the B page, scans downward and collects every position that is white (255).
+      - Only points at least 5 px below the bottom-surface reference line (`SCAN_START_OFFSET=5`) are collected. (This excludes points that turned white because of damage or light reflection just below the bottom surface.)
 
-   1. **Establish the surface references.** Extract the B-page surface contours and calculate the bottom surface reference line. Use the A-page pillar reference for the upper surface and create the A/B surface crop comparison. The outer left/right surface reference extensions are hidden; their contact markers and reference geometry remain available.
-   2. **Define the slots.** Use the surface contour's horizontal range to establish the original three-slot geometry. Keep its two outer vertical boundaries fixed when changing the slot count; four-slot mode redistributes the internal boundaries evenly. Two-slot mode uses only **Slot 1 and Slot 3 of the three-slot layout**, retaining their positions and labels rather than dividing the surface into two halves. Vertical slot guides extend downward from the bottom surface reference.
-   3. **Find a yellow horizontal line in each active slot.** Scan the original A-page grayscale image downward from the bottom surface reference. Select the first row where pixels with brightness **240–255 occupy at least 20% of the slot width**. For a tilted reference, only pixels below the reference at their own x-coordinate count toward the numerator; the denominator remains the full slot width. A slot with no qualifying row receives no yellow line.
-   4. **Find a representative point.** Starting one row below the yellow line, scan downward at every x-coordinate in the slot. Find the first pixel with brightness **230–255** in each column, then select the point with the greatest vertical distance from the yellow line. Break distance ties by proximity to the slot center. Columns without a matching pixel are excluded. Draw the selected point in yellow, with a radius of 3 px. Both this scan and the yellow-line scan use original A pixels, before enhancement.
-   5. **Extract experimental ball contours.** Apply a **3×3 median filter**, followed by unsharp masking with a **3×3 Gaussian blur, sigma 1.0, and enhancement amount 2.5**. Within each active slot below its yellow line, use inverse binary thresholding at **249**: values at or below 249 become foreground. Extract external contours and keep candidates with contour area **160–3,200 px²**. Draw all retained candidates as **1 px green contours** on the A/B analysis images. The current implementation uses fixed-threshold extraction, not Watershed or a U-shaped boundary assumption. `ENABLE_SLOT_CONTOUR_EXPERIMENT` can disable this contour experiment.
-   6. **Create and fit the ROIs.** Create an ROI only when the representative point is **at least 10 px below** the yellow line. Its initial width is **40 px**, centered horizontally on the representative point; its top is the yellow line and its bottom is the representative point. Among contours whose bounding boxes overlap the initial ROI, choose the one nearest the representative point, using larger contour area to break distance ties. Expand the ROI as needed to contain that contour's full bounding box. Consequently, a fitted ROI can exceed 40 px in width or extend beyond the initial yellow-line/point bounds. If no contour overlaps it, retain the initial ROI. Show the rectangle on both A/B analysis images.
-   7. **Show the side-panel ROI preview and measurements.** Crop each valid ROI from the original A page and enlarge it 3× for display. Keep the preview free of green contour overlays. Below each crop, show the original slot label and **W / H in original pixels**. Measurements are the axis-aligned bounding-box width and height of the largest-area retained contour whose bounding-box center lies inside the fitted ROI; they are not the ROI dimensions. Show `--` when no contour qualifies. No dimension arrows are drawn. Crops are clipped to the image bounds when necessary.
+   2-2. `get_distant_bottommost_points`
+      - Finds the lowest point among all white pixels (`global_max_y`), which is the bottom of a ball.
+      - Selects additional bottom points only where they are separated by 10 px on the y-axis and 40 px on the x-axis.
 
-   Detection status currently requires both a surface contour and at least one valid ROI. Contour candidates, measurements, and thresholds are experimental and do not establish a final product OK/NG decision. Changes to the enhancement or area limits should be assessed on original images; strong enhancement can also amplify internal features.
+   2-3. `get_ball_square_bounds`, `draw_ball_squares`
+      - Draws bounding boxes from the selected ball bottom points and passes them to the UI.
 
-   **Possible contour-free alternative:** if contour extraction is removed later, use each active slot's horizontal boundaries directly as the ROI width, with the yellow line and representative point defining the vertical bounds and the same 10 px minimum gap. This is a proposed alternative, not the current ROI implementation. Contour-based W/H measurements would then be unavailable.
+   > Optional) Precise arc measurement and contour validation (`ball_arc.measure_ball_arcs`)
+      > - Extracts Canny edges and fits them to calculate radius, error, contour, and symmetry.
 
-#### Bottom Inspection · Chip Location and Circle Candidates
+![alt text](assets/side-ball-example.png)
 
-- Only `Bottom Detection` processes page A for this flow. Page B is an original reference.
-- A 3×3 Gaussian blur and threshold `max(background + 20, (background + Otsu) / 2)` separate the chip, including its gray substrate.
-- Six 40×40 px ROIs follow the chip position and rotation: 10%/90% across its width and 10%/50%/90% down its height.
-- Dark components are extracted from the binary image before closing or filling its interior. External background and components smaller than 10 px² are excluded.
-- Circle candidate conditions: **contour area 300–450 px², circularity ≥ 0.70, short/long side ratio ≥ 0.70, and distance from the expected ROI center ≤ 12 px**. Circularity is `4π × area / perimeter²`.
-- Rejected components retain their actual contours and review reasons; empty ROIs remain missing. Components touching the search boundary and multiple qualifying components also require review.
-- A shows the ROIs and actual contours: green for candidates, orange for review, red for missing. Detail captions use C for circularity and A for area. The chip outline rectangle and silhouette panel stay hidden.
-- The status distinguishes six candidate regions from results requiring review. **Candidate acceptance is not a product pass/fail classification.**
-- The detector assumes one rectangular chip on a dark background and rejects clipped, small, or elongated chips. Original A pixels and the original crop remain unchanged.
+### Bottom Inspection · Chip Location and Circle Candidates
 
-#### Top Surface Inspection
+> The expected centers of the six ROIs are set by combining a horizontal ratio (`fx`) and a vertical ratio (`fy`) from the chip's top-left corner.
+> The ROI size and the area and center-distance conditions for circle candidates are checked as ratios of the chip size.
+
+1. Binarization and chip location
+
+   1-1. `find_bottom_chip`, `_binarize`, `_locate_bottom_chip`
+      - Binarizes the gray chip using both the background brightness and the Otsu threshold.
+      - From the largest near-rectangular chip contour, finds the four corners (`chip.corners`), center, rotation angle, and chip mask.
+
+   1-2. `find_circle_regions`
+      - Calculates the expected centers of the six ROIs from the top-left corner using the `fx` and `fy` ratios. The positions are `10%` left/right and `10%·50%·90%` top/middle/bottom.
+      - Builds each ROI by multiplying the chip's top and left edge vectors by `23.53%`. As a result, when the chip rotates or scales, the ROIs follow in the same direction and proportion.
+      - Finds the actual contour of the dark component in each ROI and measures its area, circularity, aspect ratio, and distance from the expected center.
+      - A circle candidate must have circularity of at least `0.80`, aspect ratio of at least `0.70`, area of `0.93%–1.56%` of the chip, and center distance of at most `7.06%` of the chip width. Components touching the search boundary or multiple candidates are left for review.
+
+   1-3. `draw_circle_regions`, `create_circle_roi_preview`
+      - Draws the ROIs and actual contours in colors matching the candidate, review, and missing states.
+      - Arranges the six ROIs as 3 × 2 tiles and shows the circularity and area for each position.
+
+      > - Area: computes the chip and circle areas and takes their ratio `circle // chip * 100`
+      > - Circularity: area relative to perimeter `(4 * pi * area) / perimeter ^ 2`
+      > - Aspect ratio: the circle's width and height should be similar
+      > - Distance between the expected and actual centers `(center distance // chip width * 100)`
+
+
+
+### Top Surface Inspection
 
 _Planned for a future release._
 
 ## Project Structure
 
 ```text
-├── app.py             # Starts the PyQt5 application
-├── ui.py              # Main window layout, state, and user interaction
-├── ui_components.py   # Reusable image, histogram, and modal widgets
-├── general.py         # Shared image I/O, capture-path, and notes helpers
-├── contour.py         # Detection-independent contour extraction and geometry
+├── app.py               # Starts the PyQt5 application (--dark, --install-desktop-entry options)
+├── ui.py                # Main window layout, state, and user interaction
+├── ui_components.py     # Shared image and modal widgets, SVG icons
+├── styles.py            # Light and dark UI styles, icon and caption colors
+├── general.py           # Image I/O, capture paths, notes, filename labels (OK/NG/DK)
+├── contour.py           # Detection-independent contour extraction and geometry
 ├── bottom/
-│   ├── pipeline.py    # A thresholding, chip location, and circle pipeline
-│   └── circles.py     # Six ROIs, dark components, candidate rules, and previews
+│   ├── pipeline.py      # A-page thresholding, chip location, and circle-candidate flow
+│   └── circles.py       # Six ROIs, dark components, candidate rules, and display
 ├── side/
-│   ├── pipeline.py    # Orchestrates the complete Side detection flow
-│   ├── surface.py     # Side surface detection and crop previews
-│   └── ball.py        # Side ball detection
-├── styles.py          # UI styles
-├── requirements.txt   # Python dependencies
-├── assets/            # Application icons and other resources
-└── dataset/           # Inspection image data
+│   ├── pipeline.py      # Assembles the full Side detection flow
+│   ├── surface.py       # Side surface detection and crop previews
+│   ├── surface_crop.py  # Surface crop tiles shared by training-data creation and inference
+│   ├── ball.py          # Side ball detection
+│   ├── ball_arc.py      # Shoulder-ball bottom arc measurement
+│   ├── classifier.py    # Surface OK/NG classification CNN
+│   ├── detection.py     # Surface defect object detection (Faster R-CNN)
+│   └── segmenter.py     # Surface defect segmentation U-Net
+├── tools/               # Training and evaluation scripts (see "Training and Evaluation Tools")
+│   ├── data/            # Build training datasets
+│   ├── train/           # Train models
+│   ├── eval/            # Evaluate models
+│   ├── results/         # Summarize evaluation results
+│   └── CNN_guide.md     # Detailed guide: data creation → training → evaluation
+├── models/              # Trained models (.pt) with settings, graphs, and evaluation results (private)
+├── assets/              # Application icon, button SVG icons, and other resources
+├── requirements.txt     # Python dependencies
+└── dataset/             # Inspection image data (private)
 ```
 
-Verify chip localization, circle candidates, and mode switching with `python -m unittest discover -s tests -v`.
+Files created while the program runs:
+
+- `captures/`: screen-capture JPGs (`captures/{timestamp}/{source filename}_{number}.jpg`)
+- `notes.csv`: per-image notes
 
 ## Requirements
 
 - Python 3.10–3.12 recommended
 - Input `TIFF` images must contain identically sized A/B pages. The program assumes a specific dataset format.
 
+## Dataset and Models
+
+> **The inspection image dataset (`dataset/`) and the trained models (`models/`) are not public while the research is in progress.**
+
+- This repository contains only the inspection program and the training and evaluation code.
+- To try the program, prepare your own TIFF images with A/B pages and open them with `불러오기` (Load).
+- The default paths and example commands of the `tools/` scripts are written for the private dataset and models. When running them on your own data, specify paths with the input folder and options such as `--data`, `--model`, and `--output`.
+
 ## Installation
 
-Run the following commands after receiving the project.
+Run the following commands after getting the project.
 
 ### macOS / Linux
 
 ```bash
-cd diehand_cv
+git clone https://github.com/dongwoodustinkang/die-detection.git
+cd die-detection
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
@@ -98,7 +140,8 @@ python -m pip install -r requirements.txt
 ### Windows PowerShell
 
 ```powershell
-cd diehand_cv
+git clone https://github.com/dongwoodustinkang/die-detection.git
+cd die-detection
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
@@ -110,5 +153,69 @@ python -m pip install -r requirements.txt
 ```bash
 python app.py
 ```
+
+To run in dark mode, add the `--dark` option.
+
+```bash
+python app.py --dark
+```
+
+Some Linux desktops (e.g. GNOME on Wayland) look up the app icon through a `.desktop` file. If the dock or taskbar shows a generic icon, run this once from the virtual environment you use. Run it again after moving the project folder or the virtual environment.
+
+```bash
+python app.py --install-desktop-entry
+```
+
+### Using the Window
+
+The interface is in Korean; the button names are given below with their English meaning.
+
+| Action | How |
+|---|---|
+| Change inspection mode | Click the title at the top left (`Side Detection` ▾) and choose Side / Bottom / Top |
+| Load images | `불러오기` (Load) → select several TIFF files or one folder |
+| Detect again | `검출하기` (Detect) |
+| Move between images | Keyboard `←` / `→`, or the previous/next buttons on the bottom navigation bar |
+| Notes | Note button on the navigation bar (saved to `notes.csv`) |
+| Screen capture | Camera button on the navigation bar (saved to `captures/`) |
+| Enlarge an image | Click a result image or preview |
+| Quit | `Esc` |
+
+The label on the right of the header is the ground-truth label taken from the **filename**, not a detection result.
+
+| Label | Condition |
+|---|---|
+| `NG` (defective) | The filename contains `NG` |
+| `OK` (normal) | The filename contains `OK` (`NG` wins if both appear) |
+| `DK` (unknown) | Neither appears |
+
+## Training and Evaluation Tools (tools)
+
+Scripts for the side-surface defect models (classification CNN, Faster R-CNN, U-Net). Run them from the repository root.
+
+| Folder | Script | Role |
+|---|---|---|
+| `tools/data/` | `make_data.py` | Builds train/val/test classification datasets from surface crop tiles |
+| | `make_sg_data.py` | Builds a segmentation (U-Net) dataset from NG masks |
+| | `make_od_data.py` | Builds an object-detection (box) dataset from NG masks |
+| `tools/train/` | `train_classifier.py` | Trains the surface OK/NG classification CNN |
+| | `train_segmenter.py` | Trains the surface defect segmentation U-Net |
+| | `train_detection.py` | Trains the surface defect Faster R-CNN |
+| | `train_graphs.py` | Saves training graphs (used by the other training scripts) |
+| `tools/eval/` | `eval_classifier.py` | Evaluates the classification CNN |
+| | `eval_segmenter.py` | Evaluates the U-Net |
+| | `eval_detection.py` | Evaluates the Faster R-CNN |
+| `tools/results/` | `summarize_results.py` | Summarizes model × evaluation-set accuracy into a CSV |
+| | `export_errors.py` | Collects the original and crop images listed in a misclassification CSV into `dataset/errors/` |
+
+Examples (the dataset and model paths are private; replace them as described in [Dataset and Models](#dataset-and-models)):
+
+```bash
+python tools/data/make_data.py --overwrite
+python tools/train/train_classifier.py
+python tools/eval/eval_classifier.py --model models/Classifier/side_surface_cnnA_102211.pt
+```
+
+Check each script's options with `--help`. Besides `requirements.txt`, the training scripts need `matplotlib`, and Faster R-CNN needs `torchvision`.
 
 > This repository was developed for specific experimental research and may not be suitable for other projects.
